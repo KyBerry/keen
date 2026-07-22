@@ -183,9 +183,22 @@ def _collect_ips_for_host(host: str) -> set[str]:
     except (OSError, ValueError):
         pass
 
+    # A four-part numeric host with leading zeroes is ambiguous across URL
+    # parsers and operating-system resolvers. For example, Linux and BSD-style
+    # parsers can read ``010.0.0.1`` as octal 8.0.0.1, while another resolver
+    # may read it as decimal 10.0.0.1. Classify the explicit decimal reading as
+    # well so a public interpretation cannot hide an RFC1918 destination.
+    decimal_parts = host.split(".")
+    if len(decimal_parts) == 4 and all(
+        part and part.isascii() and part.isdigit() for part in decimal_parts
+    ):
+        decimal_values = [int(part, 10) for part in decimal_parts]
+        if all(0 <= value <= 255 for value in decimal_values):
+            ips.add(".".join(str(value) for value in decimal_values))
+
     # IPv6 literal — strip brackets if present.
     v6_candidate = host
-    if v6_candidate.startswith("[") and v6_candidate.endswith("XX]XX"):
+    if v6_candidate.startswith("[") and v6_candidate.endswith("]"):
         v6_candidate = v6_candidate[1:-1]
     v6_candidate = v6_candidate.split("%", 1)[0]  # drop zone-id
     try:
