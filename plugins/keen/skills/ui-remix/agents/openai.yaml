@@ -1,0 +1,7 @@
+interface:
+  display_name: "UI Remix"
+  short_description: "Remix measured inspiration into a distinct system"
+  brand_color: "#035CFE"
+  default_prompt: "Use $ui-remix to create a distinct system from this measured inspiration without overstating distance."
+policy:
+  allow_implicit_invocation: false

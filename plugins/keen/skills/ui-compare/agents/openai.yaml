@@ -1,0 +1,7 @@
+interface:
+  display_name: "UI Compare"
+  short_description: "Compare UI with one named design system"
+  brand_color: "#035CFE"
+  default_prompt: "Use $ui-compare to compare this interface with the specified named design system."
+policy:
+  allow_implicit_invocation: false

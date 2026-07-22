@@ -1,0 +1,192 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/keen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: plugins/keen/pyproject.toml
+      - name: Install dev deps
+        run: pip install -e ".[dev]"
+      - name: ruff check
+        run: ruff check harness/ tests/ scripts/
+      - name: ruff format --check
+        run: ruff format --check harness/ tests/ scripts/
+
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/keen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: plugins/keen/pyproject.toml
+      - name: Install dev deps
+        run: pip install -e ".[dev]"
+      - name: mypy
+        run: mypy harness/
+
+  package-smoke:
+    name: clean wheel smoke
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/keen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: plugins/keen/pyproject.toml
+      - name: Build and test isolated wheel
+        run: python scripts/smoke_wheel.py
+
+  test:
+    name: test (${{ matrix.os }} / py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: ubuntu-latest
+            python: "3.14"
+          - os: macos-latest
+            python: "3.12"
+          - os: windows-latest
+            python: "3.12"
+    defaults:
+      run:
+        working-directory: plugins/keen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: plugins/keen/pyproject.toml
+      - name: Install package + dev deps
+        run: pip install -e ".[dev]"
+      - name: Install playwright chromium
+        run: playwright install chromium --with-deps
+      - name: pytest
+        run: pytest tests/ -v
+
+  plugin-validate:
+    name: plugin-validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML for frontmatter parsing
+        run: pip install "PyYAML>=6.0.2,<7.0"
+      - name: Validate plugin/marketplace manifests and SKILL.md frontmatter
+        run: |
+          python <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          import yaml
+
+          repo_root = Path(".").resolve()
+          errors: list[str] = []
+
+          # 1. marketplace.json
+          mp_path = repo_root / ".claude-plugin" / "marketplace.json"
+          if not mp_path.exists():
+              errors.append(f"missing: {mp_path}")
+          else:
+              try:
+                  mp = json.loads(mp_path.read_text())
+              except json.JSONDecodeError as e:
+                  errors.append(f"{mp_path}: invalid JSON: {e}")
+              else:
+                  for key in ("name", "description", "owner", "plugins"):
+                      if key not in mp:
+                          errors.append(f"{mp_path}: missing required key '{key}'")
+                  if not isinstance(mp.get("plugins"), list) or not mp["plugins"]:
+                      errors.append(f"{mp_path}: 'plugins' must be a non-empty list")
+                  else:
+                      for i, plugin in enumerate(mp["plugins"]):
+                          for key in ("name", "source", "description"):
+                              if key not in plugin:
+                                  errors.append(
+                                      f"{mp_path}: plugins[{i}] missing '{key}'"
+                                  )
+
+          # 2. every plugin.json under plugins/*/.claude-plugin/plugin.json
+          for plugin_json in sorted(repo_root.glob("plugins/*/.claude-plugin/plugin.json")):
+              try:
+                  data = json.loads(plugin_json.read_text())
+              except json.JSONDecodeError as e:
+                  errors.append(f"{plugin_json}: invalid JSON: {e}")
+                  continue
+              for key in ("name", "version", "description"):
+                  if key not in data:
+                      errors.append(f"{plugin_json}: missing required key '{key}'")
+
+          # 3. every SKILL.md frontmatter
+          for skill_md in sorted(repo_root.glob("plugins/*/skills/*/SKILL.md")):
+              text = skill_md.read_text()
+              if not text.startswith("---"):
+                  errors.append(f"{skill_md}: missing frontmatter opener (---)")
+                  continue
+              try:
+                  _, fm, _ = text.split("---", 2)
+              except ValueError:
+                  errors.append(f"{skill_md}: malformed frontmatter (no closing ---)")
+                  continue
+              try:
+                  meta = yaml.safe_load(fm) or {}
+              except yaml.YAMLError as e:
+                  errors.append(f"{skill_md}: invalid YAML frontmatter: {e}")
+                  continue
+              if not isinstance(meta, dict):
+                  errors.append(f"{skill_md}: frontmatter is not a YAML mapping")
+                  continue
+              for key in ("name", "description"):
+                  if not meta.get(key):
+                      errors.append(f"{skill_md}: missing frontmatter key '{key}'")
+
+          if errors:
+              print("Plugin validation failed:", file=sys.stderr)
+              for err in errors:
+                  print(f"  - {err}", file=sys.stderr)
+              sys.exit(1)
+          print("All manifests + SKILL.md frontmatter validated OK.")
+          PY

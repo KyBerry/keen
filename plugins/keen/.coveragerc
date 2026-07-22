@@ -1,0 +1,11 @@
+[run]
+source = harness
+omit =
+  harness/__main__.py
+
+[report]
+exclude_also =
+  if TYPE_CHECKING:
+  raise NotImplementedError
+  pragma: no cover
+fail_under = 70

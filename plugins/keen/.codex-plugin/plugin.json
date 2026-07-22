@@ -1,0 +1,44 @@
+{
+  "name": "keen",
+  "version": "0.7.0+codex.20260722060451",
+  "description": "Sharp-eyed UI/UX review and design-system workflows for Codex. Requires the separately installed local Keen CLI and Playwright Chromium runtime.",
+  "author": {
+    "name": "Kyle Berry",
+    "email": "kylestephberry@gmail.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "ui",
+    "ux",
+    "design",
+    "accessibility",
+    "design-system",
+    "critique",
+    "ai-slop",
+    "playwright"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Keen",
+    "shortDescription": "Spot UI issues and shape stronger systems",
+    "longDescription": "Give rendered interfaces a keen eye: measure design and accessibility signals, compare named systems, characterize AI-default patterns and visual taste, and turn evidence into validated design-system proposals. The plugin supplies model workflows; the local Keen CLI and Playwright Chromium runtime are installed separately.",
+    "developerName": "Kyle Berry",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Review this interface and prioritize the top three fixes.",
+      "Find the strongest AI-default patterns in this UI.",
+      "Turn this captured run into a coherent design system."
+    ],
+    "brandColor": "#035CFE",
+    "composerIcon": "./assets/keen-logo.png",
+    "logo": "./assets/keen-logo.png",
+    "screenshots": [
+      "./assets/review-preview.png"
+    ]
+  }
+}

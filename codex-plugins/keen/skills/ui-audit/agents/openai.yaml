@@ -1,0 +1,7 @@
+interface:
+  display_name: "UI Audit"
+  short_description: "Reanalyze an existing Keen run"
+  brand_color: "#035CFE"
+  default_prompt: "Use $ui-audit to reanalyze this existing Keen run without recapturing it."
+policy:
+  allow_implicit_invocation: false

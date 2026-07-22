@@ -1,0 +1,60 @@
+{
+  "_comment": "Viewport presets used by the harness. Width/height are CSS pixels. deviceScaleFactor controls retina capture (2 = 2x bitmap output for crisp screenshots; 1 = 1:1). The defaults below are tuned for product UI: mobile is iPhone 14 Pro, tablet is iPad Pro 11\", desktop is the most common laptop size in 2025 analytics, wide is for dashboard / monitor layouts. Override by passing --viewport-config <path-to-this-file> to the harness, or extend by adding new keys.",
+  "presets": {
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "deviceScaleFactor": 2,
+      "description": "iPhone 14 Pro logical resolution. Use as the default mobile target."
+    },
+    "mobile-small": {
+      "width": 360,
+      "height": 780,
+      "deviceScaleFactor": 2,
+      "description": "Smaller Android footprint. Good for testing tight layouts."
+    },
+    "mobile-320": {
+      "width": 320,
+      "height": 568,
+      "deviceScaleFactor": 2,
+      "description": "WCAG SC 1.4.10 Reflow target. Content must work at this width."
+    },
+    "tablet": {
+      "width": 834,
+      "height": 1194,
+      "deviceScaleFactor": 2,
+      "description": "iPad Pro 11\" portrait."
+    },
+    "tablet-landscape": {
+      "width": 1194,
+      "height": 834,
+      "deviceScaleFactor": 2,
+      "description": "iPad Pro 11\" landscape."
+    },
+    "desktop": {
+      "width": 1440,
+      "height": 900,
+      "deviceScaleFactor": 1,
+      "description": "Most common laptop viewport in 2024-2025 analytics. Default desktop target."
+    },
+    "desktop-13": {
+      "width": 1280,
+      "height": 800,
+      "deviceScaleFactor": 1,
+      "description": "13\" laptop. Useful for catching mid-breakpoint issues."
+    },
+    "wide": {
+      "width": 1920,
+      "height": 1080,
+      "deviceScaleFactor": 1,
+      "description": "External monitor. Tests upper-bound layout behavior."
+    },
+    "ultrawide": {
+      "width": 2560,
+      "height": 1440,
+      "deviceScaleFactor": 1,
+      "description": "Use only when designing explicitly for ultrawide."
+    }
+  },
+  "default_set": ["mobile", "tablet", "desktop"]
+}

@@ -1,0 +1,43 @@
+target-version = "py310"
+line-length = 100
+
+[lint]
+select = [
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "W",   # pycodestyle warnings
+  "I",   # isort
+  "UP",  # pyupgrade
+  "B",   # flake8-bugbear
+  "C4",  # flake8-comprehensions
+  "SIM", # flake8-simplify
+  "RUF", # ruff-specific
+]
+ignore = [
+  "E501",  # line-too-long is handled by formatter
+  "B008",  # function call in default arg (common in pytest fixtures)
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["E501"]
+"harness/capture.py" = ["E501"]  # long JS strings
+# Intentional Unicode in user-facing critique output:
+#   - analyze.py rule/message strings use `×` (e.g. "44×44px") which is the
+#     conventional WCAG/HIG notation.
+#   - systemize.py HTML preview uses `×` for "used N times" callouts.
+#   - _sanitize.py uses fullwidth `＜`/`＞` to neutralize prompt-injection tags
+#     in a way that still renders visibly, plus NBSP in a regex char class.
+"harness/analyze.py" = ["RUF001"]
+"harness/systemize.py" = ["RUF001"]
+"harness/_sanitize.py" = ["RUF001"]
+"harness/_html_report.py" = ["RUF001"]
+"harness/cli.py" = ["RUF001"]
+"harness/preview_system.py" = ["RUF001"]
+"harness/slop.py" = ["RUF001", "RUF002"]
+"harness/taste.py" = ["RUF001", "RUF002", "RUF003"]
+"harness/validate_system.py" = ["RUF002"]
+"tests/test_colors_mutants.py" = ["RUF003"]
+"tests/test_html_report.py" = ["RUF001"]
+"tests/test_sanitize*.py" = ["RUF001", "RUF003"]
+"tests/test_slop.py" = ["RUF003"]
+"tests/test_taste.py" = ["RUF003"]

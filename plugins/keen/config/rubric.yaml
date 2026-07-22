@@ -1,0 +1,65 @@
+# Rubric configuration for Keen.
+#
+# The harness scores findings as a "damage" total: sum of severity weights
+# across all findings. Lower is better. The threshold below maps damage to a
+# letter grade and a one-line interpretation, so the agent has a consistent
+# signal to lead the report with.
+#
+# Edit this file in place — it's loaded by harness.rubric.load_config() at
+# scoring time. The Python defaults in rubric.py mirror this file exactly,
+# so deleting the file does not break anything.
+
+severity_weights:
+  # P0 = something a user definitely hits (broken control, illegible text,
+  # accessibility-blocking violation). Each P0 contributes 10 damage.
+  P0: 10.0
+  # P1 = a clear quality / consistency / standards issue. Most findings live here.
+  P1: 3.0
+  # P2 = polish, nit, minor inconsistency. 1 damage each.
+  P2: 1.0
+
+# Default severity per predicate id. These can be overridden per-system in
+# the harness. Aligning with WCAG conformance level: A and AA failures are
+# P0, AAA failures are P1, system-specific drift is P1, and minor visual
+# nits are P2.
+predicate_severities:
+  target.size-aa: P1          # WCAG SC 2.5.8 AA; geometry needs exception review
+  hit-target.size: P1         # selected design-system conformance preference
+  contrast_text_aa: P0        # WCAG SC 1.4.3 AA
+  contrast_ui_aa: P1          # WCAG SC 1.4.11 AA — borderline cases sometimes intentional
+  accessible_name: P0         # WCAG SC 4.1.2 A
+  form_label: P0              # WCAG SC 1.3.1 A + 3.3.2 A
+  focus_visible: P0           # WCAG SC 2.4.7 AA
+  heading_hierarchy: P1       # WCAG SC 2.4.6 / 1.3.1
+  link_distinguishable: P1    # WCAG SC 1.4.1 A — usually a styling drift
+  spacing_off_grid: P2        # System drift, low individual impact
+  font_size_off_scale: P2     # System drift, low individual impact
+  border_radius_off_scale: P2 # System drift, low individual impact
+  duplicate_h1: P1            # WCAG / SEO concern
+  alt_text_missing: P0        # WCAG SC 1.1.1 A
+
+# Damage thresholds → letter grade.
+# Tuned for a single-screen review. Whole-app reviews scale linearly with
+# screens captured.
+grade_thresholds:
+  - { max_damage: 5,   grade: "A",  summary: "Production-quality. Ship-blocking issues absent." }
+  - { max_damage: 15,  grade: "B",  summary: "Solid. Address the listed P1s before ship." }
+  - { max_damage: 35,  grade: "C",  summary: "Functional but rough. Several issues affect usability or accessibility." }
+  - { max_damage: 75,  grade: "D",  summary: "Significant accessibility or quality gaps. Don't ship without addressing P0s." }
+  - { max_damage: 9999, grade: "F", summary: "Not ready. Fundamental accessibility or quality failures." }
+
+# Per-component-kind floor for "should this be flagged at all".
+# The harness will only emit findings on components matching these kinds.
+# Set to null to include everything.
+component_filter:
+  include_kinds: null  # null = all
+  exclude_kinds:
+    - "image"          # decorative images get noisy without manual review
+    - "label"          # labels are only interesting in context of their input
+
+# How to render findings.
+report:
+  group_by: "component"   # "component" | "predicate" | "severity"
+  show_passing: false     # if true, list components with zero findings too
+  include_screenshots: true
+  max_findings_per_component: 10

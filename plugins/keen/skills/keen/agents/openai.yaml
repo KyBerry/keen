@@ -1,0 +1,7 @@
+interface:
+  display_name: "Keen"
+  short_description: "Review and systemize rendered UI evidence"
+  brand_color: "#035CFE"
+  default_prompt: "Use $keen to choose and run the smallest evidence-based UI workflow for this request."
+policy:
+  allow_implicit_invocation: true

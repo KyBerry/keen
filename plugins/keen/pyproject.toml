@@ -1,0 +1,97 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "keen-harness"
+version = "0.7.0"
+description = "Deterministic UI/UX critique harness — capture screens, decompose into components, run predicates against design system rules."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Kyle Berry", email = "kylestephberry@gmail.com" }]
+keywords = ["ui", "ux", "accessibility", "design-system", "critique", "playwright"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Topic :: Software Development :: Quality Assurance",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
+# Dependency floor rationale:
+# - Playwright 1.55.1 fixes CVE-2025-59288 (installer MitM RCE via `curl -k`).
+# - Pillow 12.2.0 fixes CVE-2023-50447, CVE-2024-28219, CVE-2025-48379,
+#   CVE-2026-25990, CVE-2026-40192, CVE-2026-42308, CVE-2026-42309,
+#   CVE-2026-42310, CVE-2026-42311.
+# - PyYAML 6.0.2 has Python 3.13 wheel support.
+dependencies = [
+  "playwright>=1.55.1,<2.0",
+  "Pillow>=12.2.0,<13.0",
+  "PyYAML>=6.0.2,<7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0,<9.0",
+  "pytest-asyncio>=0.23,<1.0",
+  "ruff>=0.6,<1.0",
+  "mypy>=1.10,<2.0",
+  "types-PyYAML",
+  "hypothesis>=6.100,<7.0",
+  "coverage[toml]>=7.5,<8.0",
+  "mutmut>=2.4,<3.0",
+]
+
+[project.scripts]
+keen = "harness.cli:main"
+
+[tool.setuptools]
+packages = ["harness"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+harness = [
+  "py.typed",
+  "templates/*.tmpl",
+  "resources/config/*.json",
+  "resources/config/*.yaml",
+  "resources/references/*.md",
+  "resources/references/design-systems/*.md",
+  "resources/references/heuristics/*.md",
+]
+
+[tool.mypy]
+python_version = "3.10"
+strict_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = false   # harness is partially typed
+ignore_missing_imports = true   # playwright stubs are spotty
+files = ["harness"]
+
+# Mutation testing config. Schema: mutmut 2.x reads this block from
+# pyproject.toml. See https://mutmut.readthedocs.io/en/latest/index.html
+# for the full options list (paths_to_mutate, tests_dir, runner, backup,
+# use_coverage).
+#
+# We mutation-test only the small, pure modules — colors, _urlsafe,
+# _sanitize, rubric, diff — because they have no I/O, no Playwright/Pillow
+# touchpoints, and clear input/output contracts. Larger modules with side
+# effects (capture, analyze, decompose, cli, report, tokens, systemize)
+# would inflate the mutmut run time past the point of usefulness.
+#
+# `use_coverage = true` makes mutmut skip mutations on lines that are
+# uncovered by the test suite, which substantially shrinks the mutant
+# population for our 76 %-covered codebase. The full five-module scope
+# takes 30–45 minutes wall time on a laptop; to run a faster subset use
+# `mutmut run --paths-to-mutate <comma-separated-files>` on the CLI.
+[tool.mutmut]
+paths_to_mutate = "harness/_urlsafe.py,harness/_sanitize.py,harness/colors.py,harness/rubric.py,harness/diff.py"
+runner = ".venv/bin/python -m pytest -x -q"
+tests_dir = "tests/"
+backup = false
+use_coverage = true

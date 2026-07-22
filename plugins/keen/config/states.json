@@ -1,0 +1,64 @@
+{
+  "_comment": "Capture states. Each state describes a way to take an additional screenshot of the same route, beyond the default render. The harness runs `setup_steps` (a list of Playwright actions described as JSON) before capture for each state. Most states require manual setup hooks per-product — they're documented here so the agent knows what to look for during analysis.",
+  "states": {
+    "default": {
+      "description": "The page as it loads, no user interaction. Always captured.",
+      "setup_steps": []
+    },
+    "hover-primary": {
+      "description": "Primary action button hovered. Tests hover affordance.",
+      "setup_steps": [
+        { "action": "hover", "selector": "[data-testid=primary-cta], button[type=submit], .primary, [aria-label*=Submit]", "fallback": "first-button" }
+      ]
+    },
+    "focus-first-input": {
+      "description": "First form input focused. Tests focus indicator visibility (WCAG SC 2.4.7).",
+      "setup_steps": [
+        { "action": "focus", "selector": "input:not([type=hidden]), textarea, select", "fallback": "first" }
+      ]
+    },
+    "form-error": {
+      "description": "Form submitted with invalid data, errors rendered. Requires per-product setup.",
+      "setup_steps": [
+        { "action": "click", "selector": "[type=submit], button:has-text('Submit'), button:has-text('Save')" }
+      ],
+      "manual_review_needed": true
+    },
+    "loading": {
+      "description": "Async action in flight. Spinner / skeleton visible. Requires per-product setup.",
+      "setup_steps": [],
+      "manual_review_needed": true
+    },
+    "empty": {
+      "description": "List / table / dashboard with zero results. Requires test data or per-product setup.",
+      "setup_steps": [],
+      "manual_review_needed": true
+    },
+    "dark": {
+      "description": "Dark color scheme via prefers-color-scheme: dark.",
+      "setup_steps": [
+        { "action": "emulate_color_scheme", "value": "dark" }
+      ]
+    },
+    "high-contrast": {
+      "description": "Forced-colors / high contrast mode (Windows). Tests SC 1.4.11 fallbacks.",
+      "setup_steps": [
+        { "action": "emulate_forced_colors", "value": "active" }
+      ]
+    },
+    "reduced-motion": {
+      "description": "prefers-reduced-motion: reduce. Animations should be suppressed.",
+      "setup_steps": [
+        { "action": "emulate_reduced_motion", "value": "reduce" }
+      ],
+      "manual_review_needed": true
+    },
+    "zoom-200": {
+      "description": "Browser zoom at 200%. Tests SC 1.4.4 Resize Text.",
+      "setup_steps": [
+        { "action": "set_zoom", "value": 2.0 }
+      ]
+    }
+  },
+  "default_set": ["default", "focus-first-input"]
+}

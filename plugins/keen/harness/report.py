@@ -1,0 +1,521 @@
+"""Report stage: assemble the final JSON report, human-readable summary,
+per-component crops, and annotated overview screenshots.
+
+The annotated overviews are one-image-per-viewport with red boxes around P0
+findings and yellow boxes around P1s — far more useful than scanning per-
+component crops when triaging a screen.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Any
+
+from harness import __version__, _html_report
+from harness import rubric as rubric_mod
+from harness._sanitize import (
+    sanitize_capture_meta,
+    sanitize_component,
+    sanitize_finding,
+)
+
+logger = logging.getLogger("keen.report")
+
+
+SEVERITY_COLORS = {
+    "P0": (220, 38, 38),  # red-600
+    "P1": (245, 158, 11),  # amber-500
+    "P2": (148, 163, 184),  # slate-400
+}
+
+
+def _crop_components(captures_dir: Path, components: list[dict]) -> None:
+    """Crop each component's bounding box out of its source screenshot."""
+    try:
+        from PIL import Image, UnidentifiedImageError
+    except ImportError:
+        return  # crops are optional
+
+    crops_dir = captures_dir / "components"
+    crops_dir.mkdir(parents=True, exist_ok=True)
+    captures_root = captures_dir.resolve()
+
+    cache: dict[str, Any] = {}
+    for c in components:
+        rel = c.get("capture_path")
+        if not rel:
+            continue
+        screen_path = (captures_dir / rel).resolve()
+        try:
+            screen_path.relative_to(captures_root)
+        except ValueError:
+            logger.warning(
+                "blocked path traversal: %s outside %s",
+                screen_path,
+                captures_root,
+            )
+            continue
+        if not screen_path.exists():
+            continue
+        if str(screen_path) not in cache:
+            try:
+                with Image.open(screen_path) as im:
+                    cache[str(screen_path)] = im.convert("RGB")
+            except (OSError, UnidentifiedImageError):
+                logger.warning(
+                    "failed to load screenshot for cropping: %s",
+                    screen_path,
+                    exc_info=True,
+                )
+                continue
+        img = cache[str(screen_path)]
+        scale = float(c.get("device_pixel_ratio") or 1.0)
+        b = c["box"]
+        x, y, w, h = b["x"] * scale, b["y"] * scale, b["w"] * scale, b["h"] * scale
+        pad = 8
+        x0, y0 = max(0, int(x - pad)), max(0, int(y - pad))
+        x1 = min(img.width, int(x + w + pad))
+        y1 = min(img.height, int(y + h + pad))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        crop = img.crop((x0, y0, x1, y1))
+        crop_name = f"{c['viewport']}-{c['state']}-{c['component_kind']}-{c['index']}.png"
+        crop_path = crops_dir / crop_name
+        try:
+            crop.save(crop_path)
+            c["crop_path"] = str(crop_path.relative_to(captures_dir))
+        except (OSError, ValueError):
+            logger.warning(
+                "failed to save crop %s",
+                crop_path,
+                exc_info=True,
+            )
+            continue
+
+
+def _annotate_overviews(captures_dir: Path, components: list[dict]) -> dict[str, str]:
+    """Draw boxes on each unique full-page screenshot for components with findings.
+
+    Returns a dict mapping viewport-state -> relative annotated path.
+    """
+    try:
+        from PIL import Image, ImageDraw, UnidentifiedImageError
+    except ImportError:
+        return {}
+
+    out_dir = captures_dir / "screens"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    captures_root = captures_dir.resolve()
+
+    by_capture: dict[str, list[dict]] = {}
+    for c in components:
+        rel = c.get("capture_path")
+        if not rel or not c.get("findings"):
+            continue
+        by_capture.setdefault(rel, []).append(c)
+
+    annotated_paths: dict[str, str] = {}
+    for rel, comps in by_capture.items():
+        src = (captures_dir / rel).resolve()
+        try:
+            src.relative_to(captures_root)
+        except ValueError:
+            logger.warning("blocked path traversal: %s outside %s", src, captures_root)
+            continue
+        if not src.exists():
+            continue
+        try:
+            with Image.open(src) as im:
+                img = im.convert("RGB").copy()
+        except (OSError, UnidentifiedImageError):
+            logger.warning(
+                "failed to load screenshot for annotation: %s",
+                src,
+                exc_info=True,
+            )
+            continue
+        draw = ImageDraw.Draw(img)
+        for c in comps:
+            scale = float(c.get("device_pixel_ratio") or 1.0)
+            b = c["box"]
+            x0 = int(b["x"] * scale)
+            y0 = int(b["y"] * scale)
+            x1 = int((b["x"] + b["w"]) * scale)
+            y1 = int((b["y"] + b["h"]) * scale)
+            severities = [f["severity"] for f in c.get("findings", [])]
+            worst = "P0" if "P0" in severities else ("P1" if "P1" in severities else "P2")
+            color = SEVERITY_COLORS.get(worst, SEVERITY_COLORS["P2"])
+            for off in range(3):
+                draw.rectangle([x0 - off, y0 - off, x1 + off, y1 + off], outline=color)
+        # Output path
+        out_name = Path(rel).stem + "-annotated.png"
+        out_path = out_dir / out_name
+        try:
+            img.save(out_path)
+            annotated_paths[Path(rel).stem] = str(out_path.relative_to(captures_dir))
+        except (OSError, ValueError):
+            logger.warning(
+                "failed to save annotated overview %s",
+                out_path,
+                exc_info=True,
+            )
+            continue
+    return annotated_paths
+
+
+def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, Any]:
+    """Assemble report.json from analysis files in captures_dir/analysis/."""
+    captures_dir = Path(captures_dir)
+    components: list[dict] = []
+    global_findings: list[dict] = []
+    summaries: list[dict] = []
+    captures_meta: list[dict] = []
+
+    for analysis_path in sorted((captures_dir / "analysis").glob("*.json")):
+        data = json.loads(analysis_path.read_text())
+        for comp in data.get("components", []):
+            # Defense-in-depth: even though decompose/analyze already
+            # sanitize, the on-disk analysis file could have been authored
+            # by hand or stale from before sanitization shipped.
+            sanitize_component(comp)
+            for f in comp.get("findings", []) or []:
+                sanitize_finding(f)
+            components.append(comp)
+        for finding in data.get("global_findings", []) or []:
+            sanitize_finding(finding)
+            global_findings.append(finding)
+        summaries.append(
+            {
+                "file": str(analysis_path.relative_to(captures_dir)),
+                **data.get("summary", {}),
+            }
+        )
+
+    for dom_path in sorted((captures_dir / "dom").glob("*.json")):
+        dom = json.loads(dom_path.read_text())
+        meta = dom.get("meta", {})
+        # Page title and URL are the most attacker-controlled fields in the
+        # entire pipeline — a hostile page picks them freely. Sanitize before
+        # they land in report.json, where the agent will load them as
+        # context.
+        captures_meta.append(
+            sanitize_capture_meta(
+                {
+                    "url": dom.get("url"),
+                    "title": dom.get("title"),
+                    "viewport": meta.get("viewport"),
+                    "state": meta.get("state"),
+                    "screen_path": meta.get("screen_path"),
+                    "document_size": dom.get("documentSize"),
+                    "manual_review_needed": meta.get("manual_review_needed", False),
+                    "focus_coverage": dom.get("focus_coverage", {}),
+                    "coverage": meta.get("coverage")
+                    or dom.get("coverage")
+                    or {
+                        "complete": not bool(meta.get("truncated") or dom.get("truncated")),
+                        "reason": "legacy-truncated"
+                        if bool(meta.get("truncated") or dom.get("truncated"))
+                        else None,
+                    },
+                }
+            )
+        )
+
+    flagged = [c for c in components if c.get("findings")]
+    _crop_components(captures_dir, flagged)
+    annotated = _annotate_overviews(captures_dir, flagged)
+
+    cfg = rubric_mod.load_config()
+    analysis = {"components": components, "global_findings": global_findings}
+    scoring = rubric_mod.score(analysis, config=cfg)
+    top = rubric_mod.top_findings(analysis, limit=15)
+    # top_findings carries finding messages which may quote component text.
+    # Sanitize once more here so the report's most-prominent surface is safe.
+    for f in top:
+        sanitize_finding(f)
+
+    tokens_path = captures_dir / "tokens" / "extracted.json"
+    if not tokens_path.exists():
+        tokens_path = captures_dir / "tokens.json"  # legacy fallback
+        if tokens_path.exists():
+            logger.warning("using legacy tokens.json path; expected tokens dir")
+    tokens = json.loads(tokens_path.read_text()) if tokens_path.exists() else {}
+
+    dom_coverage_complete = bool(captures_meta) and all(
+        bool((capture.get("coverage") or {}).get("complete", True)) for capture in captures_meta
+    )
+    requested_count = len(captures_meta)
+    succeeded_count = len(captures_meta)
+    manifest_complete: bool | None = None
+    manifest_failures = 0
+    manifest_path = captures_dir / "capture-manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            requested = manifest.get("requested") if isinstance(manifest, dict) else None
+            succeeded = manifest.get("succeeded") if isinstance(manifest, dict) else None
+            failures = manifest.get("failures") if isinstance(manifest, dict) else None
+            if not isinstance(requested, list) or not isinstance(succeeded, list):
+                raise ValueError("capture manifest requested/succeeded must be lists")
+            if not isinstance(failures, list):
+                failures = []
+            requested_count = len(requested)
+            succeeded_count = len(succeeded)
+            manifest_failures = len(failures)
+            manifest_complete = bool(manifest.get("complete"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            logger.warning("capture manifest is unreadable; coverage is provisional", exc_info=True)
+            manifest_complete = False
+
+    coverage_complete = dom_coverage_complete
+    if manifest_complete is not None:
+        coverage_complete = (
+            coverage_complete
+            and manifest_complete
+            and manifest_failures == 0
+            and requested_count > 0
+            and succeeded_count == requested_count
+            and len(captures_meta) == succeeded_count
+        )
+    coverage = {
+        "complete": coverage_complete,
+        "captures_requested": requested_count,
+        "captures_complete": sum(
+            1
+            for capture in captures_meta
+            if bool((capture.get("coverage") or {}).get("complete", True))
+        ),
+        "captures_succeeded": succeeded_count,
+        "capture_failures": manifest_failures,
+        "manifest_present": manifest_complete is not None,
+        "provisional": not coverage_complete,
+    }
+    if not captures_meta:
+        scoring = {
+            **scoring,
+            "grade": "INCOMPLETE",
+            "grade_summary": "No captures were available; no quality grade was issued.",
+            "score": None,
+            "provisional": True,
+        }
+    elif not coverage_complete:
+        scoring = {
+            **scoring,
+            "grade_summary": (
+                f"{scoring.get('grade_summary', '')} Partial DOM coverage; grade is provisional."
+            ).strip(),
+            "provisional": True,
+        }
+
+    # Convenience top-level mirrors of the most-asked-for score fields. The
+    # canonical values still live under `score.*`; these are just the values
+    # downstream agents look for at the top level when grading at a glance.
+    grade = scoring.get("grade")
+    damage = scoring.get("score")
+
+    result = {
+        "version": __version__,
+        "target_system": target_system,
+        "coverage": coverage,
+        "captures": captures_meta,
+        "annotated_overviews": annotated,
+        "grade": grade,
+        "damage": damage,
+        "score": scoring,
+        "top_findings": top,
+        "global_findings": global_findings,
+        "tokens": tokens,
+        "components": components,
+    }
+
+    # Emit a compact, agent-first index. The full report remains available for
+    # lazy evidence lookup, but agents should not ingest every computed style.
+    brief = build_agent_brief(result)
+    (captures_dir / "agent-brief.json").write_text(json.dumps(brief, indent=2) + "\n")
+
+    # Emit an HTML report alongside the JSON/markdown output. Link local image
+    # assets by default to avoid duplicating full screenshots as base64.
+    # Best-effort: failure to render the HTML must not block JSON emission.
+    try:
+        summary_md = render_summary(result)
+        _html_report.write_report(result, captures_dir, summary_md, link_images=True)
+    except Exception:
+        logger.exception("html report emission failed")
+
+    return result
+
+
+def build_agent_brief(report: dict[str, Any]) -> dict[str, Any]:
+    """Build the bounded artifact agents should read before the full report."""
+    score = report.get("score") or {}
+    captures = []
+    for capture in report.get("captures", []):
+        captures.append(
+            {
+                key: capture.get(key)
+                for key in (
+                    "viewport",
+                    "state",
+                    "screen_path",
+                    "manual_review_needed",
+                    "coverage",
+                )
+            }
+        )
+    grouped_findings: list[dict[str, Any]] = []
+    grouped_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    finding_fields = (
+        "severity",
+        "predicate_id",
+        "component_id",
+        "component_kind",
+        "message",
+        "rule",
+        "crop_path",
+        "finding_id",
+        "box",
+    )
+    for finding in report.get("top_findings", []):
+        key = (
+            str(finding.get("predicate_id") or ""),
+            str(finding.get("component_kind") or ""),
+            str(finding.get("message") or ""),
+        )
+        scope = {
+            "viewport": finding.get("viewport"),
+            "state": finding.get("state"),
+        }
+        existing = grouped_by_key.get(key)
+        if existing is not None:
+            existing["occurrences"] += 1
+            if (
+                scope not in existing["responsive_scopes"]
+                and len(existing["responsive_scopes"]) < 6
+            ):
+                existing["responsive_scopes"].append(scope)
+            continue
+        if len(grouped_findings) >= 8:
+            continue
+        item = {
+            field: finding.get(field) for field in finding_fields if finding.get(field) is not None
+        }
+        item["occurrences"] = 1
+        item["responsive_scopes"] = [scope]
+        grouped_by_key[key] = item
+        grouped_findings.append(item)
+
+    return {
+        "version": report.get("version"),
+        "target_system": report.get("target_system"),
+        "coverage": report.get("coverage"),
+        "grade": score.get("grade"),
+        "damage": score.get("score"),
+        "grade_summary": score.get("grade_summary"),
+        "counts": score.get("counts", {}),
+        "by_component_kind": score.get("by_component_kind", {}),
+        "captures": captures,
+        "annotated_overviews": report.get("annotated_overviews", {}),
+        "top_findings": grouped_findings,
+        "token_diagnostics": (report.get("tokens") or {}).get("diagnostics", {}),
+        "artifacts": {
+            "summary": "summary.md",
+            "full_report": "report.json",
+            "html_report": "report.html",
+            "components": "components/",
+            "analysis": "analysis/",
+        },
+    }
+
+
+def render_summary(report: dict[str, Any]) -> str:
+    lines: list[str] = []
+    lines.append("# Keen review")
+    lines.append("")
+    lines.append("## Verdict")
+    lines.append("")
+    sc = report.get("score", {})
+    grade = sc.get("grade", "?")
+    grade_summary = sc.get("grade_summary", "")
+    lines.append(f"**Grade:** {grade} — {grade_summary}")
+    damage = sc.get("score")
+    damage_display = "not scored" if damage is None else str(damage)
+    lines.append(f"**Damage score:** {damage_display} (lower is better)")
+    counts = sc.get("counts", {})
+    lines.append(
+        f"**Findings:** P0={counts.get('P0', 0)}  "
+        f"P1={counts.get('P1', 0)}  P2={counts.get('P2', 0)}"
+    )
+    if report.get("target_system"):
+        lines.append(f"**Target system:** {report['target_system']}")
+    lines.append("")
+
+    coverage = report.get("coverage") or {}
+    if coverage.get("provisional"):
+        lines.append(
+            "> **Partial audit:** capture coverage is incomplete. "
+            "The grade is provisional; resolve capture limits or failures before shipping."
+        )
+        lines.append("")
+
+    lines.append("## Capture matrix")
+    lines.append("")
+    lines.append(f"**Captures:** {len(report.get('captures', []))}")
+    for cap in report.get("captures", []):
+        manual = " ⚠ manual-review-needed" if cap.get("manual_review_needed") else ""
+        lines.append(
+            f"- {cap.get('viewport')}/{cap.get('state')} → `{cap.get('screen_path')}`{manual}"
+        )
+    annotated = report.get("annotated_overviews", {})
+    if annotated:
+        lines.append("")
+        lines.append("**Annotated overviews** (red=P0, yellow=P1, slate=P2):")
+        for _stem, path in annotated.items():
+            lines.append(f"- `{path}`")
+    lines.append("")
+
+    lines.append("## Top findings")
+    lines.append("")
+    top_findings = report.get("top_findings", [])
+    for f in top_findings:
+        crop = f" `{f['crop_path']}`" if f.get("crop_path") else ""
+        lines.append(
+            f"- **[{f['severity']}]** `{f['predicate_id']}` "
+            f"({f['component_kind']}, {f.get('viewport', '')}/{f.get('state', '')}){crop}  "
+            f"— {f['message']}"
+        )
+    if not top_findings:
+        lines.append("_No prioritized findings were emitted._")
+    lines.append("")
+
+    by_kind = sc.get("by_component_kind", {})
+    if by_kind:
+        lines.append("## Issue density by component kind")
+        lines.append("")
+        lines.append("| Kind | Total | With findings | P0 | P1 | P2 | Density |")
+        lines.append("|------|------:|--------------:|---:|---:|---:|--------:|")
+        for kind, row in sorted(by_kind.items(), key=lambda x: -x[1]["density_pct"]):
+            lines.append(
+                f"| {kind} | {row['total']} | {row['with_findings']} | "
+                f"{row['P0']} | {row['P1']} | {row['P2']} | {row['density_pct']}% |"
+            )
+        lines.append("")
+
+    diag = report.get("tokens", {}).get("diagnostics", {})
+    if diag:
+        lines.append("## Token diagnostics")
+        lines.append("")
+        for k, v in diag.items():
+            lines.append(f"- **{k}**: {v}")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append(
+        "_This is the human-facing fallback. The agent should read `agent-brief.json` "
+        "as its sole first artifact, inspect annotated overviews for selected findings, "
+        "and query `report.json` only for chosen evidence. Apply the canonical skill's "
+        "screen-intent guide when intent analysis is relevant._"
+    )
+    return "\n".join(lines)

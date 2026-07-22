@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "selected_skill": {
+      "type": ["string", "null"]
+    },
+    "system_creation_allowed": {
+      "type": "boolean"
+    },
+    "product_source_edit_allowed": {
+      "type": "boolean"
+    },
+    "will_execute": {
+      "type": "boolean"
+    },
+    "reason": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "selected_skill",
+    "system_creation_allowed",
+    "product_source_edit_allowed",
+    "will_execute",
+    "reason"
+  ]
+}

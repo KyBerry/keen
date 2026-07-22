@@ -1,0 +1,7 @@
+interface:
+  display_name: "UI Capture"
+  short_description: "Capture viewports and states without critique"
+  brand_color: "#035CFE"
+  default_prompt: "Use $ui-capture to capture this interface across the requested viewports and states without critiquing it."
+policy:
+  allow_implicit_invocation: false
