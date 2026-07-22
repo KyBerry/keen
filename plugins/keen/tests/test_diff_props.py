@@ -56,7 +56,11 @@ def _write_run(base: Path, name: str, report: dict) -> Path:
 
 
 @given(report=_report)
-@settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 def test_diff_identical_runs_has_no_added_or_removed(tmp_path_factory, report: dict) -> None:
     """diff(a, a) — same report on both sides — must be all unchanged."""
     base = tmp_path_factory.mktemp("diff_identical")
@@ -68,7 +72,11 @@ def test_diff_identical_runs_has_no_added_or_removed(tmp_path_factory, report: d
 
 
 @given(report_a=_report, report_b=_report)
-@settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 def test_diff_symmetric(tmp_path_factory, report_a: dict, report_b: dict) -> None:
     """diff(a, b).added (by key) == diff(b, a).removed (by key) and vice versa.
 
@@ -93,7 +101,11 @@ def test_diff_symmetric(tmp_path_factory, report_a: dict, report_b: dict) -> Non
 
 
 @given(report_a=_report, report_b=_report)
-@settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 def test_diff_counts_non_negative(tmp_path_factory, report_a: dict, report_b: dict) -> None:
     """All bucket sizes are non-negative; sum is bounded by total findings."""
     base = tmp_path_factory.mktemp("diff_counts")

@@ -245,7 +245,7 @@ def _classify(elem: dict[str, Any], role: str) -> str | None:
 
 def decompose(dom_path: Path) -> list[Component]:
     """Decompose a single dom/<...>.json file into Components."""
-    data = json.loads(dom_path.read_text())
+    data = json.loads(dom_path.read_text(encoding="utf-8"))
     meta = data.get("meta", {})
     viewport_name = meta.get("viewport", "")
     state = meta.get("state", "")

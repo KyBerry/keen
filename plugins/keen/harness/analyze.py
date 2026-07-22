@@ -1494,7 +1494,7 @@ def analyze_file(
     If `captures_dir` is provided, builds a pixel sampler so pixel-aware
     predicates can run against the screenshots.
     """
-    components = json.loads(components_path.read_text())
+    components = json.loads(components_path.read_text(encoding="utf-8"))
     sampler = _build_pixel_sampler(captures_dir) if captures_dir else None
     return analyze_components(
         components,

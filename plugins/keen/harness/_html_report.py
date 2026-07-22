@@ -729,7 +729,7 @@ def render_report(
     damage_val = score.get("score")
     damage = "—" if damage_val is None else f"{damage_val}"
 
-    template_text = _TEMPLATE_PATH.read_text()
+    template_text = _TEMPLATE_PATH.read_text(encoding="utf-8")
     tmpl = Template(template_text)
     return tmpl.substitute(
         title=html.escape(str(title)),

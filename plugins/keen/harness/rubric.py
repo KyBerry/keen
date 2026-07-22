@@ -193,7 +193,7 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
         logger.warning("rubric.yaml: PyYAML is not installed; falling back to defaults")
         return cfg
     try:
-        loaded = yaml.safe_load(path.read_text()) or {}
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as e:
         logger.warning(
             "rubric.yaml: %s; falling back to defaults for the whole file",

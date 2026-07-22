@@ -103,7 +103,7 @@ def _all_components(captures_dir: Path) -> list[dict]:
         return out
     for path in sorted(cdir.glob("*.json")):
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(data, list):
@@ -116,7 +116,7 @@ def _tokens(captures_dir: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
 

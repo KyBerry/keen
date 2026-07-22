@@ -84,11 +84,11 @@ def _csv(s: str) -> list[str]:
 
 def _normalize_capture_target(target: str) -> str:
     """Turn an existing local file path into the file URL Playwright expects."""
-    if urlparse(target).scheme:
-        return target
     candidate = Path(target).expanduser()
     if candidate.is_file():
         return candidate.resolve().as_uri()
+    if urlparse(target).scheme:
+        return target
     return target
 
 
@@ -195,7 +195,7 @@ def load_custom_system_tokens(name: str) -> dict[str, Any] | None:
     if not candidate.exists():
         return None
     try:
-        data = json.loads(candidate.read_text())
+        data = json.loads(candidate.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     spacing = data.get("spacing", {})
@@ -409,7 +409,7 @@ def _focus_coverage_for(captures_dir: Path, dom_filename: str) -> dict[str, int]
     if not dom_path.exists():
         return {}
     try:
-        data = json.loads(dom_path.read_text())
+        data = json.loads(dom_path.read_text(encoding="utf-8"))
         return data.get("focus_coverage", {}) or {}
     except (OSError, json.JSONDecodeError) as e:
         logger.warning("could not read focus_coverage from %s: %s", dom_path, e)
@@ -427,7 +427,9 @@ def _do_decompose(captures_dir: Path) -> list[Path]:
     for dom_path in sorted(dom_dir.glob("*.json")):
         components_path = components_dir / dom_path.name
         components = decompose_mod.decompose(dom_path)
-        components_path.write_text(json.dumps([c.to_dict() for c in components], indent=2))
+        components_path.write_text(
+            json.dumps([c.to_dict() for c in components], indent=2), encoding="utf-8"
+        )
         written.append(components_path)
     return written
 
@@ -449,7 +451,7 @@ def _do_analyze(captures_dir: Path, target_system: str | None) -> list[Path]:
             captures_dir=captures_dir,
             focus_coverage=focus_cov,
         )
-        analysis_path.write_text(json.dumps(analysis, indent=2))
+        analysis_path.write_text(json.dumps(analysis, indent=2), encoding="utf-8")
         written.append(analysis_path)
     return written
 
@@ -458,8 +460,8 @@ def _write_slop(captures_dir: Path) -> Path:
     """Compute the slop report for a run dir and write slop.json + slop.md."""
     sr = slop_mod.analyze_slop(captures_dir)
     out_json = captures_dir / "slop.json"
-    out_json.write_text(json.dumps(sr.to_dict(), indent=2) + "\n")
-    (captures_dir / "slop.md").write_text(slop_mod.render_markdown(sr))
+    out_json.write_text(json.dumps(sr.to_dict(), indent=2) + "\n", encoding="utf-8")
+    (captures_dir / "slop.md").write_text(slop_mod.render_markdown(sr), encoding="utf-8")
     logger.info("slop: score=%s (%s) → %s", sr.score, sr.band, out_json.relative_to(captures_dir))
     return out_json
 
@@ -468,8 +470,8 @@ def _write_taste(captures_dir: Path) -> Path:
     """Compute the taste DNA vector for a run dir and write taste.json + taste.md."""
     vec = taste_mod.extract_taste(captures_dir)
     out_json = captures_dir / "taste.json"
-    out_json.write_text(json.dumps(vec.to_dict(), indent=2) + "\n")
-    (captures_dir / "taste.md").write_text(taste_mod.render_taste_card(vec))
+    out_json.write_text(json.dumps(vec.to_dict(), indent=2) + "\n", encoding="utf-8")
+    (captures_dir / "taste.md").write_text(taste_mod.render_taste_card(vec), encoding="utf-8")
     logger.info(
         "taste: archetype=%s temperature=%s distinctiveness=%s",
         vec.archetype_hint,
@@ -484,12 +486,14 @@ def _do_tokens(captures_dir: Path, target_system: str | None) -> Path:
     tokens_dir.mkdir(parents=True, exist_ok=True)
     detected = tokens_mod.extract_from_captures(captures_dir)
     extracted_path = tokens_dir / "extracted.json"
-    extracted_path.write_text(json.dumps(detected, indent=2))
+    extracted_path.write_text(json.dumps(detected, indent=2), encoding="utf-8")
     if target_system:
         try:
             drift = tokens_mod.compare_to_system(detected, target_system)
-            (tokens_dir / "comparison.json").write_text(json.dumps(drift, indent=2))
-            (tokens_dir / "drift.md").write_text(tokens_mod.render_drift(drift))
+            (tokens_dir / "comparison.json").write_text(
+                json.dumps(drift, indent=2), encoding="utf-8"
+            )
+            (tokens_dir / "drift.md").write_text(tokens_mod.render_drift(drift), encoding="utf-8")
         except ValueError as e:
             logger.error("tokens: could not compare to system: %s", e)
     tokens_mod.write_palette(detected, tokens_dir / "palette.png")
@@ -525,8 +529,8 @@ def cmd_review(args: argparse.Namespace) -> int:
     logger.info("report: composing")
     with stage("report"):
         rep = report_mod.compose(outdir, target_system=target_system)
-        (outdir / "report.json").write_text(json.dumps(rep, indent=2))
-        (outdir / "summary.md").write_text(report_mod.render_summary(rep))
+        (outdir / "report.json").write_text(json.dumps(rep, indent=2), encoding="utf-8")
+        (outdir / "summary.md").write_text(report_mod.render_summary(rep), encoding="utf-8")
 
     logger.info("slop: scoring")
     with stage("slop"):
@@ -576,8 +580,8 @@ def cmd_audit(args: argparse.Namespace) -> int:
         _do_analyze(captures_dir, target_system=target_system)
     with stage("report"):
         rep = report_mod.compose(captures_dir, target_system=target_system)
-        (captures_dir / "report.json").write_text(json.dumps(rep, indent=2))
-        (captures_dir / "summary.md").write_text(report_mod.render_summary(rep))
+        (captures_dir / "report.json").write_text(json.dumps(rep, indent=2), encoding="utf-8")
+        (captures_dir / "summary.md").write_text(report_mod.render_summary(rep), encoding="utf-8")
     with stage("slop"):
         _write_slop(captures_dir)
     with stage("taste"):
@@ -605,12 +609,16 @@ def cmd_tokens(args: argparse.Namespace) -> int:
 
         tokens_dir = outdir / "tokens"
         tokens_dir.mkdir(parents=True, exist_ok=True)
-        (tokens_dir / "extracted.json").write_text(json.dumps(detected, indent=2))
+        (tokens_dir / "extracted.json").write_text(json.dumps(detected, indent=2), encoding="utf-8")
         if target_system:
             try:
                 drift = tokens_mod.compare_to_system(detected, target_system)
-                (tokens_dir / "comparison.json").write_text(json.dumps(drift, indent=2))
-                (tokens_dir / "drift.md").write_text(tokens_mod.render_drift(drift))
+                (tokens_dir / "comparison.json").write_text(
+                    json.dumps(drift, indent=2), encoding="utf-8"
+                )
+                (tokens_dir / "drift.md").write_text(
+                    tokens_mod.render_drift(drift), encoding="utf-8"
+                )
             except ValueError as e:
                 logger.error("tokens: %s", e)
         tokens_mod.write_palette(detected, tokens_dir / "palette.png")
@@ -675,7 +683,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
             raise SystemExit(2)
     out_path = Path(args.out) if args.out else (b / "diff.md")
     result = diff_module.diff_runs(a, b)
-    out_path.write_text(diff_module.render_markdown(result))
+    out_path.write_text(diff_module.render_markdown(result), encoding="utf-8")
     logger.info("diff written to %s", out_path)
     logger.info(
         "  +%d added, -%d removed, =%d unchanged",
@@ -716,7 +724,7 @@ def cmd_intent(args: argparse.Namespace) -> int:
     if not (target / "report.json").exists():
         logger.error("no report.json under %s", target)
         raise SystemExit(2)
-    report = json.loads((target / "report.json").read_text())
+    report = json.loads((target / "report.json").read_text(encoding="utf-8"))
     captures = report.get("captures", [])
     annotated = report.get("annotated_overviews", {})
     top = report.get("top_findings", [])
@@ -761,8 +769,10 @@ def cmd_taste(args: argparse.Namespace) -> int:
         raise SystemExit(2)
     vec = taste_mod.extract_taste(captures_dir)
     card = taste_mod.render_taste_card(vec)
-    (captures_dir / "taste.json").write_text(json.dumps(vec.to_dict(), indent=2) + "\n")
-    (captures_dir / "taste.md").write_text(card)
+    (captures_dir / "taste.json").write_text(
+        json.dumps(vec.to_dict(), indent=2) + "\n", encoding="utf-8"
+    )
+    (captures_dir / "taste.md").write_text(card, encoding="utf-8")
     logger.info(
         "taste: archetype=%s temperature=%s distinctiveness=%s",
         vec.archetype_hint,
@@ -795,9 +805,9 @@ def cmd_slop(args: argparse.Namespace) -> int:
         raise SystemExit(2)
     out = _write_slop(captures_dir)
     if args.print_markdown:
-        print((captures_dir / "slop.md").read_text())
+        print((captures_dir / "slop.md").read_text(encoding="utf-8"))
     else:
-        print(json.dumps(json.loads(out.read_text()), indent=2))
+        print(json.dumps(json.loads(out.read_text(encoding="utf-8")), indent=2))
     return 0
 
 
@@ -815,7 +825,9 @@ def cmd_derive_palette(args: argparse.Namespace) -> int:
         return 2  # CLI misuse
 
     table = palette_with_contrast(p)
-    (out_dir / "palette.json").write_text(json.dumps(table, indent=2, sort_keys=True) + "\n")
+    (out_dir / "palette.json").write_text(
+        json.dumps(table, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     logger.info("derive-palette: wrote %s", out_dir / "palette.json")
     return 0
 
@@ -832,7 +844,7 @@ def cmd_validate_system(args: argparse.Namespace) -> int:
     from harness.validate_system import validate_system as run_validation
 
     try:
-        system = json.loads(Path(args.system_json).read_text())
+        system = json.loads(Path(args.system_json).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         logger.error("validate-system: cannot read %s: %s", args.system_json, e)
         return 2
@@ -852,9 +864,11 @@ def cmd_validate_system(args: argparse.Namespace) -> int:
         out.mkdir(parents=True, exist_ok=True)
         validation_path = out / "validation.json"
         matrix_path = out / "contrast-matrix.json"
-        validation_path.write_text(json.dumps({"findings": findings}, indent=2) + "\n")
+        validation_path.write_text(
+            json.dumps({"findings": findings}, indent=2) + "\n", encoding="utf-8"
+        )
         logger.info("validate-system: wrote %s", validation_path)
-        matrix_path.write_text(json.dumps(matrix, indent=2) + "\n")
+        matrix_path.write_text(json.dumps(matrix, indent=2) + "\n", encoding="utf-8")
         logger.info("validate-system: wrote %s", matrix_path)
 
     return 1 if has_p0 else 0
@@ -878,7 +892,7 @@ def cmd_preview_system(args: argparse.Namespace) -> int:
     )
 
     try:
-        system = json.loads(Path(args.system_json).read_text())
+        system = json.loads(Path(args.system_json).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         logger.error("preview-system: cannot read %s: %s", args.system_json, e)
         return 2
@@ -886,10 +900,10 @@ def cmd_preview_system(args: argparse.Namespace) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    (out / "preview.html").write_text(render_preview(system))
+    (out / "preview.html").write_text(render_preview(system), encoding="utf-8")
     logger.info("preview-system: wrote %s", out / "preview.html")
 
-    (out / "system.md").write_text(render_system_md(system))
+    (out / "system.md").write_text(render_system_md(system), encoding="utf-8")
     logger.info("preview-system: wrote %s", out / "system.md")
 
     # Mockups: real UI archetypes rendered with the system's tokens. Disabled
@@ -897,9 +911,9 @@ def cmd_preview_system(args: argparse.Namespace) -> int:
     if getattr(args, "mockups", False):
         mock_dir = out / "mockups"
         mock_dir.mkdir(parents=True, exist_ok=True)
-        (mock_dir / "landing.html").write_text(render_landing_mockup(system))
-        (mock_dir / "dashboard.html").write_text(render_dashboard_mockup(system))
-        (mock_dir / "form.html").write_text(render_form_mockup(system))
+        (mock_dir / "landing.html").write_text(render_landing_mockup(system), encoding="utf-8")
+        (mock_dir / "dashboard.html").write_text(render_dashboard_mockup(system), encoding="utf-8")
+        (mock_dir / "form.html").write_text(render_form_mockup(system), encoding="utf-8")
         logger.info(
             "preview-system: wrote 3 mockups → %s",
             mock_dir.relative_to(out.parent) if out.parent != Path(".") else mock_dir,
@@ -924,12 +938,14 @@ def cmd_preview_system(args: argparse.Namespace) -> int:
                 labels.append(name)
                 continue
             try:
-                refs.append(json.loads(ref_json.read_text()))
+                refs.append(json.loads(ref_json.read_text(encoding="utf-8")))
                 labels.append(name)
             except (OSError, json.JSONDecodeError) as e:
                 logger.warning("preview-system: cannot read %s: %s; skipping", ref_json, e)
         if refs:
-            (out / "comparison.html").write_text(render_comparison(system, refs, labels))
+            (out / "comparison.html").write_text(
+                render_comparison(system, refs, labels), encoding="utf-8"
+            )
             logger.info("preview-system: wrote %s", out / "comparison.html")
         else:
             logger.warning(
@@ -1000,7 +1016,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             msg = f"fix: create {rel} (missing at {path})"
         else:
             try:
-                txt = path.read_text()
+                txt = path.read_text(encoding="utf-8")
                 if kind == "json":
                     json.loads(txt)
                 else:
@@ -1036,7 +1052,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     try:
         outdir.mkdir(parents=True, exist_ok=True)
         probe = outdir / ".write-probe"
-        probe.write_text("ok")
+        probe.write_text("ok", encoding="utf-8")
         probe.unlink()
         out_ok = True
         out_msg = f"ok ({outdir.resolve()})"

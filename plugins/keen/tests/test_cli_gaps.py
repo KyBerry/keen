@@ -27,8 +27,7 @@ def test_csv_helper_splits_and_strips() -> None:
 
 def test_default_outdir_includes_prefix() -> None:
     out = cli._default_outdir("review")
-    assert "review" in str(out)
-    assert str(out).startswith(".keen/")
+    assert out.parts[:2] == (".keen", "review")
 
 
 def test_normalize_capture_target_converts_existing_local_file(tmp_path: Path) -> None:

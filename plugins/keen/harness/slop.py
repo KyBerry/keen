@@ -530,7 +530,7 @@ def _components_by_capture(captures_dir: Path) -> list[tuple[str, list[dict]]]:
         if path.suffix != ".json":
             continue
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(data, list):
@@ -576,7 +576,7 @@ def _tokens(captures_dir: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
 

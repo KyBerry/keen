@@ -1540,9 +1540,9 @@ def systemize_run(run_dir: Path, name: str = "custom") -> dict[str, Any]:
     legacy_path = run_dir / "tokens.json"
 
     if tokens_path.exists():
-        extracted = json.loads(tokens_path.read_text())
+        extracted = json.loads(tokens_path.read_text(encoding="utf-8"))
     elif legacy_path.exists():
-        extracted = json.loads(legacy_path.read_text())
+        extracted = json.loads(legacy_path.read_text(encoding="utf-8"))
     else:
         # Fall back to extracting from DOM dumps in this run.
         from . import tokens as tokens_module
@@ -1555,14 +1555,14 @@ def systemize_run(run_dir: Path, name: str = "custom") -> dict[str, Any]:
         extracted = tokens_module.extract_from_captures(run_dir)
         # Cache for next time
         tokens_path.parent.mkdir(parents=True, exist_ok=True)
-        tokens_path.write_text(json.dumps(extracted, indent=2))
+        tokens_path.write_text(json.dumps(extracted, indent=2), encoding="utf-8")
 
     proposal = propose_system(extracted, name=name)
 
     manifest_path = run_dir / "capture-manifest.json"
     if manifest_path.exists():
         try:
-            manifest = json.loads(manifest_path.read_text())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             requested = manifest.get("requested") if isinstance(manifest, dict) else []
             succeeded = manifest.get("succeeded") if isinstance(manifest, dict) else []
             failures = manifest.get("failures") if isinstance(manifest, dict) else []
@@ -1599,9 +1599,9 @@ def systemize_run(run_dir: Path, name: str = "custom") -> dict[str, Any]:
 
     out_dir = run_dir / "system"
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / f"{name}.json").write_text(json.dumps(proposal, indent=2))
-    (out_dir / f"{name}.md").write_text(render_markdown(proposal))
-    (out_dir / f"{name}-preview.html").write_text(render_preview_html(proposal))
+    (out_dir / f"{name}.json").write_text(json.dumps(proposal, indent=2), encoding="utf-8")
+    (out_dir / f"{name}.md").write_text(render_markdown(proposal), encoding="utf-8")
+    (out_dir / f"{name}-preview.html").write_text(render_preview_html(proposal), encoding="utf-8")
 
     return {
         "proposal": proposal,

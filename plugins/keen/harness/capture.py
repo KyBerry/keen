@@ -165,7 +165,7 @@ def load_viewport_presets(config_path: Path | None = None) -> dict[str, dict[str
         logger.warning("viewports.json missing at %s; falling back to defaults", config_path)
         return dict(DEFAULT_VIEWPORT_PRESETS)
     try:
-        data = json.loads(config_path.read_text())
+        data = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         logger.warning(
             "viewports.json: %s; falling back to defaults for presets",
@@ -205,7 +205,7 @@ def load_states(config_path: Path | None = None) -> dict[str, dict[str, Any]]:
         logger.warning("states.json missing at %s; falling back to default state only", config_path)
         return {"default": {"setup_steps": []}}
     try:
-        data = json.loads(config_path.read_text())
+        data = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         logger.warning(
             "states.json: %s; falling back to defaults for states",
@@ -1005,7 +1005,7 @@ def load_and_validate_auth_steps(steps_path: Path) -> list[dict[str, Any]]:
             "raise the cap if your login flow genuinely needs that much."
         )
     try:
-        data = json.loads(steps_path.read_text())
+        data = json.loads(steps_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise ValueError(f"auth-steps JSON parse error in {steps_path}: {e}") from e
     return validate_auth_steps(data)
@@ -1628,7 +1628,7 @@ async def _capture_one(
             "coverage": combined_coverage,
             "websockets_blocked": True,
         }
-        dom_path.write_text(json.dumps(dom, indent=2))
+        dom_path.write_text(json.dumps(dom, indent=2), encoding="utf-8")
 
         return screen_path, dom_path
     finally:
@@ -1759,7 +1759,9 @@ async def _run_async(cfg: CaptureConfig) -> None:
                 ],
                 "complete": not failures and len(succeeded) == total,
             }
-            (cfg.outdir / "capture-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+            (cfg.outdir / "capture-manifest.json").write_text(
+                json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+            )
             logger.info(
                 "captured %d/%d (%d failures)",
                 len(succeeded),

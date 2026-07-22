@@ -35,7 +35,7 @@ def _component_index(component: dict[str, Any]) -> Any:
 
 
 def _load_findings(run_dir: Path) -> dict[str, dict[str, Any]]:
-    report = json.loads((run_dir / "report.json").read_text())
+    report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
     out: dict[str, dict[str, Any]] = {}
     for c in report.get("components", []):
         capture_scope = _capture_scope(c)
@@ -77,8 +77,8 @@ def diff_runs(run_a: Path, run_b: Path) -> dict[str, Any]:
     removed = [a[k] for k in sorted(a_keys - b_keys)]
     unchanged = [b[k] for k in sorted(b_keys & a_keys)]
 
-    rep_a = json.loads((run_a / "report.json").read_text())
-    rep_b = json.loads((run_b / "report.json").read_text())
+    rep_a = json.loads((run_a / "report.json").read_text(encoding="utf-8"))
+    rep_b = json.loads((run_b / "report.json").read_text(encoding="utf-8"))
 
     return {
         "run_a": str(run_a),

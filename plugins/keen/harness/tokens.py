@@ -75,7 +75,7 @@ def extract_from_captures(captures_dir: Path) -> dict[str, Any]:
 
     n_elements = 0
     for dom_path in _iter_dom_files(captures_dir):
-        data = json.loads(dom_path.read_text())
+        data = json.loads(dom_path.read_text(encoding="utf-8"))
         for el in data.get("elements", []):
             n_elements += 1
             s = el.get("styles", {})

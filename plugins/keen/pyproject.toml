@@ -51,7 +51,10 @@ keen = "harness.cli:main"
 
 [tool.setuptools]
 packages = ["harness"]
-include-package-data = true
+# Runtime assets are enumerated below; disabling automatic package-data
+# discovery prevents data-only directories from being mistaken for namespace
+# packages by newer setuptools releases.
+include-package-data = false
 
 [tool.setuptools.package-data]
 harness = [

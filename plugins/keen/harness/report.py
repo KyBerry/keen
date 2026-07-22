@@ -174,7 +174,7 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
     captures_meta: list[dict] = []
 
     for analysis_path in sorted((captures_dir / "analysis").glob("*.json")):
-        data = json.loads(analysis_path.read_text())
+        data = json.loads(analysis_path.read_text(encoding="utf-8"))
         for comp in data.get("components", []):
             # Defense-in-depth: even though decompose/analyze already
             # sanitize, the on-disk analysis file could have been authored
@@ -194,7 +194,7 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
         )
 
     for dom_path in sorted((captures_dir / "dom").glob("*.json")):
-        dom = json.loads(dom_path.read_text())
+        dom = json.loads(dom_path.read_text(encoding="utf-8"))
         meta = dom.get("meta", {})
         # Page title and URL are the most attacker-controlled fields in the
         # entire pipeline — a hostile page picks them freely. Sanitize before
@@ -241,7 +241,7 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
         tokens_path = captures_dir / "tokens.json"  # legacy fallback
         if tokens_path.exists():
             logger.warning("using legacy tokens.json path; expected tokens dir")
-    tokens = json.loads(tokens_path.read_text()) if tokens_path.exists() else {}
+    tokens = json.loads(tokens_path.read_text(encoding="utf-8")) if tokens_path.exists() else {}
 
     dom_coverage_complete = bool(captures_meta) and all(
         bool((capture.get("coverage") or {}).get("complete", True)) for capture in captures_meta
@@ -253,7 +253,7 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
     manifest_path = captures_dir / "capture-manifest.json"
     if manifest_path.exists():
         try:
-            manifest = json.loads(manifest_path.read_text())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             requested = manifest.get("requested") if isinstance(manifest, dict) else None
             succeeded = manifest.get("succeeded") if isinstance(manifest, dict) else None
             failures = manifest.get("failures") if isinstance(manifest, dict) else None
@@ -333,7 +333,9 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
     # Emit a compact, agent-first index. The full report remains available for
     # lazy evidence lookup, but agents should not ingest every computed style.
     brief = build_agent_brief(result)
-    (captures_dir / "agent-brief.json").write_text(json.dumps(brief, indent=2) + "\n")
+    (captures_dir / "agent-brief.json").write_text(
+        json.dumps(brief, indent=2) + "\n", encoding="utf-8"
+    )
 
     # Emit an HTML report alongside the JSON/markdown output. Link local image
     # assets by default to avoid duplicating full screenshots as base64.
