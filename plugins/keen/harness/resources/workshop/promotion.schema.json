@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://keen.local/schemas/workshop-promotion-v1.json",
+  "title": "Keen reviewed direction promotion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_session_id", "decision"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "source_session_id": { "$ref": "#/$defs/id" },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stage": { "enum": ["explore", "establish", "refine", "guard"] },
+        "summary": { "$ref": "#/$defs/short" },
+        "audiences": { "$ref": "#/$defs/list" },
+        "jobs": { "$ref": "#/$defs/list" },
+        "primary_action": { "$ref": "#/$defs/short" }
+      }
+    },
+    "direction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "qualities": { "$ref": "#/$defs/list" },
+        "anti_qualities": { "$ref": "#/$defs/list" },
+        "principles": { "$ref": "#/$defs/list" },
+        "typography": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "display": { "$ref": "#/$defs/short" },
+            "body": { "$ref": "#/$defs/short" },
+            "rationale": { "$ref": "#/$defs/short" }
+          }
+        },
+        "color": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "rationale": { "$ref": "#/$defs/short" } }
+        },
+        "density": { "$ref": "#/$defs/short" },
+        "shape": { "$ref": "#/$defs/short" },
+        "motion": { "$ref": "#/$defs/short" },
+        "imagery": { "$ref": "#/$defs/short" },
+        "icons": { "$ref": "#/$defs/short" }
+      }
+    },
+    "constraints": { "$ref": "#/$defs/list" },
+    "quality_bar": { "$ref": "#/$defs/list" },
+    "avoid": { "$ref": "#/$defs/list" },
+    "baselines": { "$ref": "#/$defs/list" },
+    "references": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "take", "avoid"],
+        "properties": {
+          "source": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "take": { "$ref": "#/$defs/list" },
+          "avoid": { "$ref": "#/$defs/list" },
+          "notes": { "type": "string", "maxLength": 300 }
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "rationale", "status"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "rationale": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "status": { "enum": ["active", "trial", "superseded"] }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,79}$" },
+    "short": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "list": {
+      "type": "array",
+      "maxItems": 12,
+      "items": { "type": "string", "minLength": 1, "maxLength": 300 }
+    }
+  }
+}

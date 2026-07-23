@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["understanding", "implementation_choices", "preserved_decisions", "rejected_defaults", "open_questions"],
+  "properties": {
+    "understanding": { "type": "string" },
+    "implementation_choices": { "type": "array", "items": { "type": "string" } },
+    "preserved_decisions": { "type": "array", "items": { "type": "string" } },
+    "rejected_defaults": { "type": "array", "items": { "type": "string" } },
+    "open_questions": { "type": "array", "items": { "type": "string" } }
+  }
+}

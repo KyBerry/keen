@@ -5,14 +5,27 @@ edit the versioned copy under `~/.claude/plugins/cache`; Claude owns that cache.
 
 ## Product boundary
 
-The Python CLI measures rendered UI and writes deterministic artifacts. Agent
-instructions interpret those artifacts. Keep measurement rules in Python and
-judgment/output guidance in the skill.
+Keen is a persistent design collaborator across Explore, Establish, Refine,
+and Guard. The Python CLI measures rendered UI and writes deterministic
+artifacts. Agent instructions interpret those artifacts, make contextual design
+decisions, and preserve consequential rationale in project-owned
+`.keen/design-context.json`.
+
+The direction workshop is a temporary, loopback-only bridge between model
+judgment and user choice. Keep its render vocabulary closed, its session files
+outside project memory, and its promotion contract narrower than the design
+context. It must not grow a model client, stock-media dependency, or generic
+questionnaire engine.
+
+Keep measurement rules in Python and judgment/output guidance in the skills.
+Automated grade, severity, taste, and AI-default outputs are candidate signals,
+not final quality verdicts.
 
 ## Agent surface
 
 - `skills/keen/SKILL.md` is the canonical Claude/Codex router and safety contract.
-- `skills/ui-*/SKILL.md` are direct, cross-platform operational workflows.
+- `skills/explore`, `skills/establish`, `skills/refine`, and `skills/guard` are
+  the four direct, cross-platform lifecycle workflows.
 - `skills/keen/references/` contains optional guides loaded only for the
   active mode.
 - `skills/*/agents/openai.yaml` contains Codex presentation and invocation policy.
@@ -38,6 +51,12 @@ When changing commands or skills:
    keep output in a user-owned project directory and let the host enforce tool
    approval.
 9. Add or update activation cases whenever a skill trigger or boundary changes.
+10. Keep utility commands behind lifecycle outcomes; do not add a public skill
+    for every deterministic instrument.
+11. A review stays read-only, while explicit design/build/fix requests may
+    change product source and must verify the rendered result afterward.
+12. Workshop options must express product-specific disagreements, and no
+    selection becomes durable until a prototype survives rendered critique.
 
 ## Verification
 
@@ -46,11 +65,13 @@ From this plugin directory, run:
 ```bash
 python3 scripts/validate_prompts.py
 python3 scripts/evaluate_skill_contracts.py
+python3 scripts/evaluate_direction_workshop.py --platform static
 python3 scripts/sync_codex_plugin_bundle.py --check
 python3 -m pytest -q
-ruff check harness tests
+ruff check harness tests scripts
 mypy harness
-python3 /Users/kyleberry/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py .
+# If the Codex plugin-creator skill is installed:
+python3 /path/to/plugin-creator/scripts/validate_plugin.py .
 claude plugin validate ../..
 claude plugin validate .
 ```

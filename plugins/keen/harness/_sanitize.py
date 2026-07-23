@@ -82,12 +82,12 @@ _BIDI_OVERRIDES = frozenset(chr(c) for c in range(0x202A, 0x202F)) | frozenset(
 #   U+FEFF  ZERO WIDTH NO-BREAK SPACE (BOM)
 _INVISIBLES = frozenset(
     {
-        "​",
-        "‌",
-        "‍",
-        "‎",
-        "‏",
-        "﻿",
+        "\u200b",
+        "\u200c",
+        "\u200d",
+        "\u200e",
+        "\u200f",
+        "\ufeff",
     }
 )
 

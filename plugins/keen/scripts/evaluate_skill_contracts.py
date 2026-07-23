@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and optionally exercise Keen skill routing contracts."""
+"""Validate and optionally exercise Keen lifecycle-routing contracts."""
 
 from __future__ import annotations
 
@@ -18,19 +18,14 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 CASES_PATH = ROOT / "evals" / "activation-cases.json"
 SCHEMA_PATH = ROOT / "evals" / "contract-output.schema.json"
-MUTATING_SKILLS = {"ui-create", "ui-remix", "ui-systemize"}
 ROUTE_SIGNALS: dict[str, tuple[str, ...]] = {
-    "ui-review": (r"\bfull (?:ui|ux) review\b", r"\bprioriti[sz]e .+corrections?\b"),
-    "ui-capture": (r"\bcapture\b", r"\bdo not critique\b"),
-    "ui-audit": (r"\breanaly[sz]e\b", r"\bwithout recaptur"),
-    "ui-compare": (r"\bcompare\b", r"\bagainst (?:material|apple|fluent|polaris|carbon|atlassian)"),
-    "ui-tokens": (r"\bextract\b", r"\b(?:design )?tokens?\b"),
-    "ui-deslop": (r"\bai-generated\b", r"\b(?:generic|measurable tells?|escape moves?)\b"),
-    "ui-taste": (r"\bvisual signature\b", r"\bdensity, type, color, shape"),
-    "ui-intent": (r"\buser'?s? likely job\b", r"\bhierarchy fights? the task\b"),
-    "ui-systemize": (r"\bcaptured keen run\b", r"\bdesign-system proposal\b"),
-    "ui-create": (r"\bcreate and validate a new design system\b", r"\bseed color\b"),
-    "ui-remix": (r"\bremix\b", r"\binspiration\b"),
+    "explore": (r"\bstarting from nothing\b", r"\b(?:moodboard|visual directions?|references)\b"),
+    "establish": (r"\bestablish\b", r"\b(?:design direction|design system|visual language)\b"),
+    "refine": (
+        r"\b(?:review|design|implement|polish|diagnose)\b",
+        r"\b(?:cheap|generic|slapped together|rendered result|product-specific)\b",
+    ),
+    "guard": (r"\b(?:baseline|maintenance)\b", r"\b(?:regressions?|drift|redesign|approved)\b"),
 }
 
 
@@ -40,44 +35,34 @@ class EvalCase:
     mode: str
     prompt: str
     expected_skill: str | None
-    system_creation_allowed: bool
+    design_context_write_allowed: bool
+    product_source_edit_allowed: bool
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--platform",
-        choices=("static", "claude", "codex"),
-        default="static",
-        help="Run deterministic checks or a fresh authenticated client process.",
-    )
+    parser.add_argument("--platform", choices=("static", "claude", "codex"), default="static")
     parser.add_argument("--case", help="Run only one case id.")
-    parser.add_argument(
-        "--max-cases",
-        type=int,
-        default=3,
-        help="Maximum live cases per invocation; static mode always runs all cases.",
-    )
-    parser.add_argument("--output", type=Path, help="Optional JSON result path.")
+    parser.add_argument("--max-cases", type=int, default=3)
+    parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
 
 def load_cases() -> list[EvalCase]:
     payload = json.loads(CASES_PATH.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != 1 or not isinstance(payload.get("cases"), list):
-        raise ValueError("activation corpus must use schema_version 1 and a cases array")
-    cases: list[EvalCase] = []
-    for raw in payload["cases"]:
-        cases.append(
-            EvalCase(
-                case_id=raw["id"],
-                mode=raw["mode"],
-                prompt=raw["prompt"],
-                expected_skill=raw["expected_skill"],
-                system_creation_allowed=raw["system_creation_allowed"],
-            )
+    if payload.get("schema_version") != 2 or not isinstance(payload.get("cases"), list):
+        raise ValueError("activation corpus must use schema_version 2 and a cases array")
+    return [
+        EvalCase(
+            case_id=raw["id"],
+            mode=raw["mode"],
+            prompt=raw["prompt"],
+            expected_skill=raw["expected_skill"],
+            design_context_write_allowed=raw["design_context_write_allowed"],
+            product_source_edit_allowed=raw["product_source_edit_allowed"],
         )
-    return cases
+        for raw in payload["cases"]
+    ]
 
 
 def parse_frontmatter(path: Path) -> dict[str, Any]:
@@ -106,11 +91,12 @@ def predict_route(prompt: str) -> str | None:
 
 def run_static(cases: list[EvalCase]) -> dict[str, Any]:
     errors: list[str] = []
-    skill_paths = sorted((ROOT / "skills").glob("*/SKILL.md"))
-    available = {parse_frontmatter(path).get("name") for path in skill_paths}
+    available = {
+        parse_frontmatter(path).get("name") for path in sorted((ROOT / "skills").glob("*/SKILL.md"))
+    }
     expected_routes = set(ROUTE_SIGNALS)
     if not expected_routes.issubset(available):
-        errors.append(f"missing route skills: {sorted(expected_routes - available)}")
+        errors.append(f"missing lifecycle skills: {sorted(expected_routes - available)}")
 
     seen_ids: set[str] = set()
     covered: set[str] = set()
@@ -124,39 +110,38 @@ def run_static(cases: list[EvalCase]) -> dict[str, Any]:
             covered.add(case.expected_skill)
             if case.expected_skill not in available:
                 errors.append(f"{case.case_id}: unknown expected skill {case.expected_skill}")
-        expected_mutation = case.expected_skill in MUTATING_SKILLS
-        if case.system_creation_allowed is not expected_mutation:
-            errors.append(
-                f"{case.case_id}: system_creation_allowed must be {expected_mutation} "
-                f"for {case.expected_skill}"
-            )
+        if case.design_context_write_allowed and case.expected_skill not in {
+            "explore",
+            "establish",
+            "guard",
+        }:
+            errors.append(f"{case.case_id}: unexpected design-context write permission")
+        if case.product_source_edit_allowed and case.expected_skill not in {"refine", "guard"}:
+            errors.append(f"{case.case_id}: unexpected product-source edit permission")
         if case.mode == "natural":
             predicted = predict_route(case.prompt)
             if predicted != case.expected_skill:
                 errors.append(
-                    f"{case.case_id}: deterministic route {predicted!r} "
-                    f"!= expected {case.expected_skill!r}"
+                    f"{case.case_id}: deterministic route {predicted!r} != {case.expected_skill!r}"
                 )
         elif case.expected_skill is not None:
-            invocations = (
-                f"$keen:{case.expected_skill}",
-                f"/keen:{case.expected_skill}",
-            )
+            invocations = (f"$keen:{case.expected_skill}", f"/keen:{case.expected_skill}")
             if not any(invocation in case.prompt for invocation in invocations):
                 errors.append(f"{case.case_id}: explicit case lacks a namespaced invocation")
 
     if covered != expected_routes:
         errors.append(
-            "activation corpus must cover every specialist skill; "
-            f"missing={sorted(expected_routes - covered)}"
+            f"activation corpus missing lifecycle skills: {sorted(expected_routes - covered)}"
         )
 
     canonical = (ROOT / "skills" / "keen" / "SKILL.md").read_text(encoding="utf-8")
     required_contract = (
-        "Do not install packages or browsers",
-        "shell-quote every dynamic value",
-        "Do not claim a system passed",
-        "Never store user systems",
+        "do not install either",
+        "shell-quote dynamic values",
+        "Treat automated grades",
+        "Never write project output",
+        "local workshop",
+        "rendered and",
     )
     for phrase in required_contract:
         if phrase not in canonical:
@@ -182,14 +167,14 @@ def contract_prompt(case: EvalCase, platform: str) -> str:
         invocation = "/keen:keen" if platform == "claude" else "$keen"
     return (
         f"{invocation}\n"
-        "This is a model-contract evaluation. Do not call tools, run commands, "
-        "open files, or modify anything. Classify the request using the loaded "
-        "Keen instructions and return only the requested JSON. "
+        "This is a model-contract evaluation. Do not call tools, run commands, open files, "
+        "or modify anything. Return only the requested JSON. "
         f"User request: {case.prompt}\n"
-        "Set selected_skill to the focused ui-* skill or null. Set "
-        "system_creation_allowed to true only for ui-create, ui-systemize, or ui-remix; "
-        "ordinary evidence artifacts under .keen do not count as system creation. "
-        "Set product_source_edit_allowed and will_execute to false."
+        "Set selected_skill to explore, establish, refine, guard, or null. Set "
+        "design_context_write_allowed true only when the user explicitly asks to save, "
+        "establish, update, or accept persistent project direction. Set "
+        "product_source_edit_allowed true only when the user explicitly asks to build, "
+        "implement, or fix product source. Set will_execute to false."
     )
 
 
@@ -216,7 +201,6 @@ def run_live_case(case: EvalCase, platform: str) -> dict[str, Any]:
         temp = Path(temp_raw)
         output_file = temp / "result.json"
         if platform == "claude":
-            schema = SCHEMA_PATH.read_text(encoding="utf-8")
             command = [
                 executable,
                 "-p",
@@ -227,7 +211,7 @@ def run_live_case(case: EvalCase, platform: str) -> dict[str, Any]:
                 "--output-format",
                 "json",
                 "--json-schema",
-                schema,
+                SCHEMA_PATH.read_text(encoding="utf-8"),
                 "--max-budget-usd",
                 "0.20",
                 "--no-session-persistence",
@@ -271,8 +255,8 @@ def run_live_case(case: EvalCase, platform: str) -> dict[str, Any]:
         selected_skill = selected_skill.rsplit(":", 1)[-1]
     passed = (
         selected_skill == case.expected_skill
-        and payload.get("system_creation_allowed") is case.system_creation_allowed
-        and payload.get("product_source_edit_allowed") is False
+        and payload.get("design_context_write_allowed") is case.design_context_write_allowed
+        and payload.get("product_source_edit_allowed") is case.product_source_edit_allowed
         and payload.get("will_execute") is False
     )
     return {"id": case.case_id, "passed": passed, "response": payload}
@@ -285,19 +269,16 @@ def main() -> int:
         cases = [case for case in cases if case.case_id == args.case]
         if not cases:
             raise SystemExit(f"unknown case: {args.case}")
-
     if args.platform == "static":
         result = run_static(cases)
     else:
-        live_cases = cases[: args.max_cases]
-        results = [run_live_case(case, args.platform) for case in live_cases]
+        results = [run_live_case(case, args.platform) for case in cases[: args.max_cases]]
         result = {
             "platform": args.platform,
             "passed": all(item["passed"] for item in results),
             "case_count": len(results),
             "results": results,
         }
-
     rendered = json.dumps(result, indent=2)
     print(rendered)
     if args.output:

@@ -1,7 +1,0 @@
-interface:
-  display_name: "UI Intent"
-  short_description: "Reconcile a screen with its user job"
-  brand_color: "#035CFE"
-  default_prompt: "Use $ui-intent to reconcile this screen with its likely user job and prioritize three changes."
-policy:
-  allow_implicit_invocation: false

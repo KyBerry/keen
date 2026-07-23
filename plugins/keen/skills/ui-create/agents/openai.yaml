@@ -1,7 +1,0 @@
-interface:
-  display_name: "UI Create"
-  short_description: "Create and validate a design system proposal"
-  brand_color: "#035CFE"
-  default_prompt: "Use $ui-create to create and validate a design system from this seed, captured site, or stated vibe."
-policy:
-  allow_implicit_invocation: false

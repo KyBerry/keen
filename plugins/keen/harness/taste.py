@@ -6,13 +6,12 @@ shape vector — color triads, type contrast, shape character, depth
 grammar, density, temperature, chromatic spread — that you can compare,
 remix, and reproduce.
 
-Two consumers:
+Lifecycle workflows use this as an optional instrument:
 
-  1. `/keen:ui-taste <url>` — extracts the vector for a captured run and writes
-     a human-readable "taste card" + machine-readable JSON.
-  2. `/keen:ui-remix <url>` — feeds the extracted vector into
-     `/keen:ui-create` as
-     an *inspiration anchor*. The remix flow uses the vector to bias
+  1. Refine or Establish can extract the vector for a captured run and write
+     a human-readable characterization card plus machine-readable JSON.
+  2. Explore or Establish can use the extracted vector as
+     an *inspiration anchor*. The creation flow uses the vector to bias
      palette strategy, type ratio, radius character, and spacing density,
      while the anti-imitation predicate ensures the output stays distinct.
 
@@ -90,6 +89,9 @@ class TasteVector:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["palette"] = [asdict(p) for p in self.palette]
+        d["interpretation"] = (
+            "Measured visual-language signals; composite values are heuristics, not quality ratings."
+        )
         return d
 
 
@@ -203,7 +205,7 @@ def _archetype_hint(
     """Pick the closest of the 5 archetypes from the vector.
 
     The mapping mirrors the priors in references/system-archetypes.md so a
-    `/keen:ui-create` flow seeded from a taste vector lands on the same archetype
+    system-creation flow seeded from a taste vector lands on the same archetype
     that the human would pick.
     """
     # Brand-forward: high chromatic intensity (saturated color does the talking)
@@ -497,8 +499,7 @@ def _polish_score(depth_signals: dict, shape_signals: dict) -> float:
 def render_taste_card(v: TasteVector) -> str:
     """Render a human-readable 'taste card' for a TasteVector.
 
-    Used as the body of `/keen:ui-taste` output and as the inspiration
-    card the agent reads when `/keen:ui-remix` seeds a new system.
+    Used as a compact characterization card when a lifecycle workflow needs it.
     """
     lines: list[str] = []
     lines.append("# Taste DNA")
@@ -506,9 +507,10 @@ def render_taste_card(v: TasteVector) -> str:
     lines.append(f"**Archetype hint:** {v.archetype_hint}")
     lines.append(f"**Temperature:** {v.color_temperature}")
     lines.append(
-        f"**Distinctiveness:** {v.scores.get('distinctiveness', 0)} · "
-        f"**Boldness:** {v.scores.get('boldness', 0)} · "
-        f"**Polish:** {v.scores.get('polish', 0)}"
+        f"**Heuristic signals (not quality ratings):** distinctiveness "
+        f"{v.scores.get('distinctiveness', 0)} · boldness "
+        f"{v.scores.get('boldness', 0)} · structural consistency "
+        f"{v.scores.get('polish', 0)}"
     )
     lines.append("")
 
@@ -587,7 +589,7 @@ def vector_distance(a: TasteVector, b: TasteVector) -> dict[str, float]:
     """Per-dimension distance between two taste vectors.
 
     Used by the anti-imitation predicate (when we want to verify a generated
-    system isn't too close to a reference) and by `/keen:ui-remix` (when we want to
+    system isn't too close to a reference) and by Establish (when we want to
     verify the remix is 'inspired by' rather than a copy).
 
     All sub-scores are in [0, 1], where 0 = identical, 1 = maximally distant.

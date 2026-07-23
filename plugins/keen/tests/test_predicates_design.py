@@ -46,16 +46,15 @@ def test_all_severities_well_formed() -> None:
     assert not bad, f"Malformed severities: {bad}"
 
 
-def test_existing_predicate_severities_unchanged() -> None:
-    """Audit pass MUST NOT modify existing predicate severities. Spot-check a
-    handful of the load-bearing ones."""
-    assert PREDICATE_SEVERITIES["hit-target.size"] == "P1"
+def test_predicate_severities_match_conformance_confidence() -> None:
+    """Deterministic failures outrank design-system and partial heuristics."""
+    assert PREDICATE_SEVERITIES["hit-target.size"] == "P2"
     assert PREDICATE_SEVERITIES["contrast.text"] == "P0"
     assert PREDICATE_SEVERITIES["name.image"] == "P0"
     assert PREDICATE_SEVERITIES["focus.no-styles"] == "P2"
     assert PREDICATE_SEVERITIES["label.association"] == "P0"
     assert PREDICATE_SEVERITIES["spacing.grid"] == "P2"
-    assert PREDICATE_SEVERITIES["link.distinguishable"] == "P1"
+    assert PREDICATE_SEVERITIES["link.distinguishable"] == "P2"
 
 
 # --- analyze_components() integration -------------------------------------
@@ -154,7 +153,10 @@ def test_landmark_one_main_fires_global() -> None:
 
 def test_target_size_aa_does_not_duplicate_hit_target_findings() -> None:
     """Unnamed reviews emit only the WCAG AA rule, with no system duplicate."""
-    comps = [_comp(box={"x": 0, "y": 0, "w": 20, "h": 20})]
+    comps = [
+        _comp(index=0, box={"x": 0, "y": 0, "w": 20, "h": 20}),
+        _comp(index=1, box={"x": 22, "y": 0, "w": 20, "h": 20}),
+    ]
     analyze_components(comps)
     pids = [f["predicate_id"] for f in comps[0].get("findings", [])]
     assert "hit-target.size" not in pids

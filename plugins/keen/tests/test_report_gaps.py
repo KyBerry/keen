@@ -9,7 +9,109 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from harness.report import build_agent_brief, compose, render_summary
+from harness.design_context import new_context
+from harness.report import _select_annotations, build_agent_brief, compose, render_summary
+
+
+def test_annotation_selection_is_prioritized_grouped_and_bounded() -> None:
+    components = [
+        {
+            "index": index,
+            "component_kind": "button",
+            "viewport": "desktop",
+            "state": "default",
+            "capture_path": "screens/desktop-default.png",
+            "device_pixel_ratio": 1,
+            "viewport_width": 1_000,
+            "box": {"x": index * 10, "y": 0, "w": 8, "h": 8},
+        }
+        for index in range(12)
+    ]
+    findings = [
+        {
+            "severity": "P0" if index == 0 else "P1",
+            "predicate_id": "repeated" if index < 5 else f"predicate-{index}",
+            "component_index": index,
+            "capture_path": "screens/desktop-default.png",
+            "message": f"finding {index}",
+        }
+        for index in range(12)
+    ]
+    findings.insert(
+        1,
+        {
+            "severity": "P1",
+            "predicate_id": "second-on-same-component",
+            "component_index": 0,
+            "capture_path": "screens/desktop-default.png",
+            "message": "group me",
+        },
+    )
+    findings.append(
+        {
+            "severity": "P2",
+            "predicate_id": "polish",
+            "component_index": 11,
+            "capture_path": "screens/desktop-default.png",
+            "message": "do not map",
+        }
+    )
+
+    annotations = _select_annotations(components, findings)
+    markers = annotations["desktop-default"]
+
+    assert len(markers) == 8
+    assert markers[0]["id"] == "A01"
+    assert markers[0]["predicate_ids"] == ["repeated", "second-on-same-component"]
+    assert sum("repeated" in marker["predicate_ids"] for marker in markers) == 2
+    assert "annotation_id" not in findings[-1]
+
+
+def test_annotation_selection_skips_wholly_offscreen_components() -> None:
+    component = {
+        "index": 1,
+        "component_kind": "link",
+        "viewport": "mobile",
+        "state": "default",
+        "capture_path": "screens/mobile-default.png",
+        "viewport_width": 390,
+        "capture_height": 844,
+        "device_pixel_ratio": 1,
+        "box": {"x": 410, "y": 10, "w": 40, "h": 20},
+    }
+    finding = {
+        "severity": "P1",
+        "predicate_id": "layout.off-canvas",
+        "component_index": 1,
+        "capture_path": "screens/mobile-default.png",
+        "message": "off screen",
+    }
+
+    assert _select_annotations([component], [finding]) == {}
+    assert "annotation_id" not in finding
+
+
+def test_annotation_selection_skips_below_partial_screenshot() -> None:
+    component = {
+        "index": 1,
+        "component_kind": "heading-2",
+        "viewport": "desktop",
+        "state": "default",
+        "capture_path": "screens/desktop-default.png",
+        "capture_width": 1440,
+        "capture_height": 900,
+        "device_pixel_ratio": 1,
+        "box": {"x": 100, "y": 1200, "w": 400, "h": 80},
+    }
+    finding = {
+        "severity": "P0",
+        "predicate_id": "contrast.text",
+        "component_index": 1,
+        "capture_path": "screens/desktop-default.png",
+        "message": "below captured viewport",
+    }
+
+    assert _select_annotations([component], [finding]) == {}
 
 
 def test_render_summary_basic() -> None:
@@ -53,9 +155,10 @@ def test_render_summary_basic() -> None:
         "tokens": {"diagnostics": {"distinct_text_colors": 7}},
     }
     out = render_summary(report)
-    assert "Grade:** B" in out
-    assert "Damage score:** 14.0" in out
-    assert "Top findings" in out
+    assert "Signal band:** B" in out
+    assert "Weighted candidate index:** 14.0" in out
+    assert "Candidate findings" in out
+    assert "not an overall verdict" in out
     assert "Issue density" in out
     assert "Token diagnostics" in out
 
@@ -118,6 +221,12 @@ def _setup_compose_inputs(captures_dir: Path) -> None:
                     "viewport": "desktop",
                     "state": "default",
                     "screen_path": "screens/desktop-default.png",
+                    "banner_dismissal": {
+                        "requested": True,
+                        "dismissed": True,
+                        "accepted_selector": "#accept",
+                        "followup_selector": None,
+                    },
                 },
                 "documentSize": {"w": 1280, "h": 800},
             }
@@ -128,7 +237,7 @@ def _setup_compose_inputs(captures_dir: Path) -> None:
 def test_compose_assembles_report(tmp_path: Path) -> None:
     _setup_compose_inputs(tmp_path)
     report = compose(tmp_path, target_system="material-3")
-    assert report["version"] == "0.7.0"
+    assert report["version"] == "0.8.0"
     assert report["target_system"] == "material-3"
     assert len(report["captures"]) == 1
     assert report["captures"][0]["title"] == "Test Page"
@@ -136,6 +245,23 @@ def test_compose_assembles_report(tmp_path: Path) -> None:
     assert "grade" in report["score"]
     # Components carried through.
     assert len(report["components"]) == 1
+    assert report["captures"][0]["banner_dismissal"]["dismissed"] is True
+
+
+def test_compose_loads_nearest_project_design_context(tmp_path: Path) -> None:
+    context_path = tmp_path / ".keen" / "design-context.json"
+    context_path.parent.mkdir()
+    payload = new_context("Northstar", stage="refine")
+    payload["project"]["jobs"] = ["Choose a deployment"]
+    context_path.write_text(json.dumps(payload))
+    run = tmp_path / ".keen" / "review" / "run"
+    _setup_compose_inputs(run)
+
+    report = compose(run)
+
+    assert report["design_context"]["project"]["name"] == "Northstar"
+    brief = json.loads((run / "agent-brief.json").read_text())
+    assert brief["design_context"]["project"]["jobs"] == ["Choose a deployment"]
 
 
 def test_compose_with_no_inputs_returns_empty(tmp_path: Path) -> None:
@@ -254,6 +380,16 @@ def test_compose_with_screenshot_exercises_crop_and_annotate(tmp_path: Path) -> 
     # Crop and annotated paths populated.
     assert any("crop_path" in c for c in report["components"] if c.get("findings"))
     assert "desktop-default" in report["annotated_overviews"]
+    assert report["annotations"]["desktop-default"][0]["id"] == "A01"
+    assert report["top_findings"][0]["annotation_id"] == "A01"
+    annotated_path = tmp_path / report["annotated_overviews"]["desktop-default"]
+    with Image.open(annotated_path) as annotated_image:
+        assert annotated_image.height > img.height
+    html_text = (tmp_path / "report.html").read_text(encoding="utf-8")
+    assert "Show evidence map" in html_text
+    assert "Inspect detail" in html_text
+    assert 'id="annotation-A01"' in html_text
+    assert "locate A01" in html_text
 
 
 def test_render_summary_with_top_findings_crop_path() -> None:
@@ -292,7 +428,7 @@ def test_compose_surfaces_truncated_capture_as_provisional(tmp_path: Path) -> No
 
 def test_agent_brief_stays_bounded_for_large_component_inventory() -> None:
     report = {
-        "version": "0.7.0",
+        "version": "0.8.0",
         "coverage": {"complete": True, "provisional": False},
         "score": {"grade": "B", "score": 10, "counts": {"P1": 2}},
         "captures": [],
@@ -343,6 +479,48 @@ def test_agent_brief_groups_responsive_duplicates_and_caps_unique_findings() -> 
         "mobile",
         "desktop",
     }
+
+
+def test_agent_brief_carries_named_element_measurement_and_model_boundary() -> None:
+    report = {
+        "score": {"grade": "B", "score": 8, "counts": {"P1": 1}},
+        "captures": [{"url": "https://example.com", "title": "Example"}],
+        "components": [
+            {
+                "index": 7,
+                "capture_path": "screens/mobile.png",
+                "tag": "button",
+                "role": "button",
+                "name": "Save changes",
+                "name_source": "browser-accessibility-tree",
+                "text": "Save changes",
+                "box": {"x": 10, "y": 20, "w": 90, "h": 28},
+            }
+        ],
+        "top_findings": [
+            {
+                "severity": "P1",
+                "predicate_id": "target.size-aa",
+                "component_index": 7,
+                "component_kind": "button",
+                "capture_path": "screens/mobile.png",
+                "message": "button measures 90x28px",
+                "measured": {"width": 90, "height": 28},
+                "expected": {"minimum_square": 44},
+                "finding_id": "finding-01",
+            }
+        ],
+        "design_context": {"project": {"name": "Example", "stage": "refine"}},
+    }
+    brief = build_agent_brief(report)
+    finding = brief["top_findings"][0]
+    assert finding["element"]["name"] == "Save changes"
+    assert finding["measured"] == {"width": 90, "height": 28}
+    assert finding["expected"] == {"minimum_square": 44}
+    assert finding["judgment_required"] is True
+    assert brief["design_context"]["project"]["stage"] == "refine"
+    assert "not an overall visual-quality verdict" in brief["automated_signal_summary"]["meaning"]
+    assert "model_decides" in brief["decision_contract"]
 
 
 def test_capture_manifest_is_authoritative_for_report_coverage(tmp_path: Path) -> None:

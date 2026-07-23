@@ -44,15 +44,18 @@ def _comp(**overrides) -> dict:
 
 
 def test_unnamed_review_uses_wcag_target_rule_without_system_p0() -> None:
-    """A 20x20 button fails WCAG AA, not an invented Apple-system P0."""
-    comps = [_comp(box={"x": 0, "y": 0, "w": 20, "h": 20})]
+    """Crowded 20x20 buttons fail WCAG AA, not an invented system rule."""
+    comps = [
+        _comp(index=0, box={"x": 0, "y": 0, "w": 20, "h": 20}),
+        _comp(index=1, box={"x": 22, "y": 0, "w": 20, "h": 20}),
+    ]
     out = analyze_components(comps)
     pids = {f["predicate_id"] for f in comps[0]["findings"]}
     assert "hit-target.size" not in pids
     assert "target.size-aa" in pids
     target_finding = next(f for f in comps[0]["findings"] if f["predicate_id"] == "target.size-aa")
     assert target_finding["severity"] == "P1"
-    assert out["summary"]["counts"]["P2"] >= 1
+    assert out["summary"]["counts"]["P1"] >= 1
 
 
 def test_contrast_text_low_contrast_emits_finding() -> None:
@@ -71,6 +74,94 @@ def test_contrast_text_low_contrast_emits_finding() -> None:
     analyze_components(comps)
     pids = {f["predicate_id"] for f in comps[0].get("findings", [])}
     assert "contrast.text" in pids
+
+
+def test_image_only_link_does_not_invent_text_contrast_or_affordance_failure() -> None:
+    comps = [
+        _comp(
+            component_kind="link",
+            name="Build status",
+            text="",
+            has_visible_text=False,
+            is_inline_text_link=False,
+            styles={
+                "color": "rgb(200, 200, 200)",
+                "backgroundColor": "rgb(255, 255, 255)",
+                "fontSize": "14px",
+                "fontWeight": "400",
+                "textDecorationLine": "none",
+            },
+        )
+    ]
+
+    analyze_components(comps)
+
+    pids = {f["predicate_id"] for f in comps[0].get("findings", [])}
+    assert "contrast.text" not in pids
+    assert "link.distinguishable" not in pids
+
+
+def test_inline_text_link_without_underline_is_manual_p2() -> None:
+    comps = [
+        _comp(
+            component_kind="link",
+            name="Read the policy",
+            text="Read the policy",
+            has_visible_text=True,
+            is_inline_text_link=True,
+            styles={
+                "color": "rgb(0, 0, 0)",
+                "backgroundColor": "rgb(255, 255, 255)",
+                "fontSize": "16px",
+                "fontWeight": "400",
+                "textDecorationLine": "none",
+            },
+        )
+    ]
+
+    analyze_components(comps)
+
+    finding = next(
+        f for f in comps[0].get("findings", []) if f["predicate_id"] == "link.distinguishable"
+    )
+    assert finding["severity"] == "P2"
+    assert finding["measured"]["evidence_complete"] is False
+
+
+def test_mixed_descendant_text_styles_do_not_invent_parent_contrast() -> None:
+    comps = [
+        _comp(
+            component_kind="heading-1",
+            has_visible_text=True,
+            text_style_divergent=True,
+            styles={
+                "color": "rgb(230, 230, 230)",
+                "backgroundColor": "rgb(255, 255, 255)",
+                "fontSize": "48px",
+                "fontWeight": "400",
+            },
+        )
+    ]
+
+    analyze_components(comps)
+
+    pids = {f["predicate_id"] for f in comps[0].get("findings", [])}
+    assert "contrast.text" not in pids
+
+
+def test_off_canvas_child_in_horizontal_rail_is_not_page_overflow() -> None:
+    comps = [
+        _comp(
+            box={"x": 400, "y": 0, "w": 100, "h": 40},
+            viewport_width=390,
+            has_horizontal_overflow_ancestor=True,
+        )
+    ]
+
+    analyze_components(comps)
+
+    pids = {f["predicate_id"] for f in comps[0].get("findings", [])}
+    assert "layout.off-canvas" not in pids
 
 
 def test_contrast_text_uses_captured_document_background_when_ancestors_are_transparent() -> None:
@@ -169,7 +260,7 @@ def test_target_system_overrides_thresholds() -> None:
     pids = {f["predicate_id"] for f in comps[0].get("findings", [])}
     assert "hit-target.size" in pids
     finding = next(f for f in comps[0]["findings"] if f["predicate_id"] == "hit-target.size")
-    assert finding["severity"] == "P1"
+    assert finding["severity"] == "P2"
     assert "material-3" in finding["rule"]
     assert out["summary"]["thresholds"]["hit_target_min_px"] == 48
 
@@ -193,14 +284,26 @@ def test_unattached_global_finding_is_preserved() -> None:
 
 
 def test_tap_target_overlap_detects_adjacent_small_buttons() -> None:
-    """Two 20x20 buttons at the same y close together -> tap-target.overlap."""
+    """Two crowded 20x20 buttons fail the WCAG target spacing rule."""
     comps = [
         _comp(index=0, box={"x": 0, "y": 0, "w": 20, "h": 20}),
         _comp(index=1, box={"x": 22, "y": 0, "w": 20, "h": 20}),
     ]
     analyze_components(comps)
     pids = {f["predicate_id"] for c in comps for f in c.get("findings", [])}
-    assert "tap-target.overlap" in pids
+    assert "target.size-aa" in pids
+
+
+def test_tap_target_overlap_ignores_adjacent_targets_that_are_already_24px() -> None:
+    comps = [
+        _comp(index=0, box={"x": 0, "y": 0, "w": 24, "h": 24}),
+        _comp(index=1, box={"x": 25, "y": 0, "w": 24, "h": 24}),
+    ]
+
+    analyze_components(comps)
+
+    pids = {f["predicate_id"] for c in comps for f in c.get("findings", [])}
+    assert "target.size-aa" not in pids
 
 
 def test_tap_target_overlap_handles_large_sparse_page_without_all_pairs() -> None:

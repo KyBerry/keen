@@ -23,12 +23,13 @@ def test_static_skill_contract_evaluation_passes() -> None:
     assert completed.returncode == 0, completed.stdout + completed.stderr
     payload = json.loads(completed.stdout)
     assert payload["passed"] is True
-    assert payload["case_count"] >= 14
-    assert len(payload["covered_skills"]) == 11
+    assert payload["case_count"] >= 12
+    assert payload["covered_skills"] == ["establish", "explore", "guard", "refine"]
 
 
 def test_codex_specialists_require_explicit_invocation() -> None:
-    for skill_dir in sorted((ROOT / "skills").glob("ui-*")):
+    skill_dirs = [path.parent for path in sorted((ROOT / "skills").glob("*/SKILL.md"))]
+    for skill_dir in (path for path in skill_dirs if path.name != "keen"):
         payload = yaml.safe_load((skill_dir / "agents" / "openai.yaml").read_text(encoding="utf-8"))
         assert payload["policy"]["allow_implicit_invocation"] is False
 

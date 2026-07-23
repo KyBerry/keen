@@ -1,7 +1,7 @@
 {
   "name": "keen",
-  "version": "0.7.0",
-  "description": "Sharp-eyed UI/UX review and design-system workflows for Claude Code. Requires the separately installed local Keen CLI and Playwright Chromium runtime described in the README.",
+  "version": "0.8.0",
+  "description": "Keen helps coding agents choose a visual direction, improve real pages, and keep a product's design consistent. Requires the local Keen CLI and Playwright Chromium runtime described in the README.",
   "license": "MIT",
   "author": {
     "name": "Kyle Berry",
@@ -13,7 +13,8 @@
     "design",
     "accessibility",
     "design-system",
-    "critique",
+    "moodboard",
+    "creative-direction",
     "playwright"
   ],
   "skills": "./skills/"

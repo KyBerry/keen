@@ -1,7 +1,0 @@
-interface:
-  display_name: "UI Taste"
-  short_description: "Characterize a measurable visual signature"
-  brand_color: "#035CFE"
-  default_prompt: "Use $ui-taste to describe the measurable visual signature of this interface."
-policy:
-  allow_implicit_invocation: false

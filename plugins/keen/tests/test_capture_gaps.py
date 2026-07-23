@@ -22,12 +22,73 @@ from harness.capture import (
     _apply_setup_step,
     _browser_launch_failure_message,
     _concurrency,
+    _enrich_accessibility_names,
+    _parse_aria_snapshot_root,
     _screenshot_options,
     _slug,
     _validate_requested_matrix,
     load_states,
     load_viewport_presets,
 )
+
+
+def test_parse_aria_snapshot_root_reads_computed_name_and_state() -> None:
+    assert _parse_aria_snapshot_root('- link "CI":') == ("link", "CI")
+    assert _parse_aria_snapshot_root('- heading "Keen" [level=1]') == (
+        "heading",
+        "Keen",
+    )
+    assert _parse_aria_snapshot_root('- button "Say \\"hello\\""') == (
+        "button",
+        'Say "hello"',
+    )
+
+
+def test_parse_aria_snapshot_root_preserves_empty_name() -> None:
+    assert _parse_aria_snapshot_root("- link:") == ("link", "")
+    assert _parse_aria_snapshot_root("") is None
+
+
+def test_accessibility_name_enrichment_uses_browser_tree_and_cleans_markers() -> None:
+    class Locator:
+        def __init__(self, snapshot: str) -> None:
+            self.snapshot = snapshot
+
+        async def aria_snapshot(self, *, timeout: int) -> str:
+            assert timeout == 1_500
+            return self.snapshot
+
+    class Page:
+        def __init__(self) -> None:
+            self.evaluations: list[object] = []
+
+        async def evaluate(self, _script: str, arg: object) -> None:
+            self.evaluations.append(arg)
+
+        def locator(self, selector: str) -> Locator:
+            snapshots = {
+                '[data-keen-ax-index="0"]': '- link "CI":',
+                '[data-keen-ax-index="1"]': '- button "Open menu"',
+            }
+            return Locator(snapshots[selector])
+
+    page = Page()
+    dom = {
+        "elements": [
+            {"index": 0, "tag": "a", "name": "", "role": ""},
+            {"index": 1, "tag": "button", "name": "Menu", "role": "button"},
+            {"index": 2, "tag": "div", "name": "Decorative", "role": ""},
+        ]
+    }
+
+    asyncio.run(_enrich_accessibility_names(page, dom))
+
+    assert dom["elements"][0]["name"] == "CI"
+    assert dom["elements"][1]["name"] == "Open menu"
+    assert dom["elements"][0]["nameSource"] == "browser-accessibility-tree"
+    assert "nameSource" not in dom["elements"][2]
+    assert page.evaluations[0][0] == [0, 1]
+    assert page.evaluations[-1] == "data-keen-ax-index"
 
 
 def test_browser_launch_failure_message_explains_missing_chromium() -> None:

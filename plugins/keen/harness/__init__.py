@@ -20,4 +20,4 @@ Conventions:
 - Nothing in this package calls an LLM; all judgment is deferred to the caller
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"

@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "keen",
-  "description": "Keen plugins for evidence-based UI review and design-system work.",
+  "description": "Keen helps coding agents make websites feel thoughtful, polished, and consistent.",
   "owner": {
     "name": "Kyle Berry",
     "email": "kylestephberry@gmail.com"
@@ -10,8 +10,8 @@
     {
       "name": "keen",
       "source": "./plugins/keen",
-      "description": "Sharp-eyed UI/UX review and design-system workflows for Claude Code. Includes direct skills for capture, review, comparison, token extraction, AI-default pattern analysis, taste, intent, system creation, and remix. Requires the separately installed local Keen CLI and Chromium runtime described in the README.",
-      "version": "0.7.0",
+      "description": "Choose a visual direction, improve real pages, and keep the product consistent. Includes private local workshops and browser-based review. Requires the local Keen CLI and Chromium runtime described in the README.",
+      "version": "0.8.0",
       "author": {
         "name": "Keen"
       },
@@ -22,11 +22,10 @@
         "design",
         "accessibility",
         "design-system",
-        "critique",
-        "ai-slop",
-        "anti-slop",
-        "taste",
-        "remix",
+        "moodboard",
+        "creative-direction",
+        "anti-generic",
+        "design-quality",
         "playwright"
       ]
     }

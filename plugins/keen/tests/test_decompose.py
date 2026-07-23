@@ -104,6 +104,32 @@ def test_decompose_propagates_document_background(tmp_path: Path) -> None:
     assert out[0].document_background == "rgb(21, 21, 18)"
 
 
+def test_decompose_propagates_actual_screenshot_bounds(tmp_path: Path) -> None:
+    p = _write_dom(
+        tmp_path,
+        [_elem(0, "button", text="Open")],
+        meta={
+            "viewport": "desktop",
+            "state": "default",
+            "viewport_size": {"width": 1440, "height": 900},
+        },
+        extra={
+            "documentSize": {"width": 1440, "height": 14000},
+            "coverage": {
+                "screenshot": {
+                    "complete": False,
+                    "captured_css_px": {"width": 1440, "height": 900},
+                }
+            },
+        },
+    )
+
+    out = decompose(p)
+
+    assert out[0].capture_width == 1440
+    assert out[0].capture_height == 900
+
+
 def test_decompose_classifies_small_textless_button_as_icon(tmp_path: Path) -> None:
     # <= 56x56 and no name/text => icon-button
     p = _write_dom(tmp_path, [_elem(0, "button", box={"x": 0, "y": 0, "w": 40, "h": 40})])
@@ -161,6 +187,33 @@ def test_decompose_anchor_with_href_is_link(tmp_path: Path) -> None:
     out = decompose(p)
     assert out[0].component_kind == "link"
     assert out[0].role == "link"
+
+
+def test_decompose_preserves_semantic_evidence_fields(tmp_path: Path) -> None:
+    p = _write_dom(
+        tmp_path,
+        [
+            _elem(
+                0,
+                "a",
+                href="/build",
+                name="Build status",
+                nameSource="browser-accessibility-tree",
+                hasVisibleText=False,
+                textStyleDivergent=True,
+                isInlineTextLink=False,
+                hasHorizontalOverflowAncestor=True,
+            )
+        ],
+    )
+
+    out = decompose(p)
+
+    assert out[0].name_source == "browser-accessibility-tree"
+    assert out[0].has_visible_text is False
+    assert out[0].text_style_divergent is True
+    assert out[0].is_inline_text_link is False
+    assert out[0].has_horizontal_overflow_ancestor is True
 
 
 def test_decompose_anchor_without_href_is_dropped(tmp_path: Path) -> None:

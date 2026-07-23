@@ -468,7 +468,7 @@ def test_editorial_dossier_cluster_does_not_ban_one_serif_heading(tmp_path: Path
     assert "slop.editorial-dossier-cluster" not in report.hit_counts
 
 
-def test_render_markdown_includes_score_and_escapes(tmp_path: Path) -> None:
+def test_render_markdown_includes_candidate_index_and_escapes(tmp_path: Path) -> None:
     tokens = {
         "type": {"families": [{"value": "Inter", "count": 100}]},
         "shape": {"border_radii_px": [{"value": 8, "count": 100}]},
@@ -476,7 +476,8 @@ def test_render_markdown_includes_score_and_escapes(tmp_path: Path) -> None:
     run = _write_run(tmp_path, components=[], tokens=tokens)
     report = analyze_slop(run)
     md = render_markdown(report)
-    assert "Slop score:" in md
+    assert "Candidate index:" in md
+    assert "not a verdict" in md
     assert str(report.score) in md
     assert report.band in md
     if report.findings:

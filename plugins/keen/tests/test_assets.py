@@ -40,7 +40,7 @@ def test_release_versions_stay_in_sync() -> None:
         codex_base_version,
         project_match.group(1),
         listing["version"],
-    } == {"0.7.0"}
+    } == {"0.8.0"}
 
 
 def test_codex_marketplace_uses_clean_generated_bundle() -> None:
@@ -54,7 +54,7 @@ def test_codex_marketplace_uses_clean_generated_bundle() -> None:
     bundle = root.parent.parent / "codex-plugins" / "keen"
     assert (bundle / ".codex-plugin" / "plugin.json").is_file()
     assert (bundle / "assets" / "keen-logo.png").is_file()
-    assert (bundle / "skills" / "ui-review" / "SKILL.md").is_file()
+    assert (bundle / "skills" / "refine" / "SKILL.md").is_file()
     assert not (bundle / ".venv").exists()
     assert not (bundle / "tests").exists()
 
@@ -66,6 +66,10 @@ def test_packaged_assets_are_complete(monkeypatch) -> None:  # type: ignore[no-u
     assert (root / "config" / "rubric.yaml").is_file()
     assert (root / "config" / "states.json").is_file()
     assert (root / "config" / "viewports.json").is_file()
+    assert (root / "workshop" / "index.html").is_file()
+    assert (root / "workshop" / "workshop.css").is_file()
+    assert (root / "workshop" / "workshop.js").is_file()
+    assert (root / "workshop" / "spec.schema.json").is_file()
     systems = sorted(path.stem for path in (root / "references" / "design-systems").glob("*.md"))
     assert systems == [
         "apple-hig",

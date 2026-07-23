@@ -565,8 +565,6 @@ def test_predicate_severities_all_p1_set() -> None:
     expected_p1 = {
         "name.link.generic",
         "heading.hierarchy",
-        "heading.duplicate-h1",
-        "link.distinguishable",
         "layout.off-canvas",
         "tap-target.overlap",
         "dialog.aria-modal",
@@ -575,7 +573,6 @@ def test_predicate_severities_all_p1_set() -> None:
         "contrast.non-text",
         "label-in-name",
         "focus.positive-tabindex",
-        "hit-target.size",
         "target.size-aa",
         "dialog.focus-trap-affordance",
         "landmark.one-main",
@@ -594,6 +591,9 @@ def test_predicate_severities_all_p2_set() -> None:
         "form.required-indicator",
         "focus.visible",
         "focus.no-styles",
+        "heading.duplicate-h1",
+        "hit-target.size",
+        "link.distinguishable",
     }
     assert expected_p2.issubset(p2_keys)
 

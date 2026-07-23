@@ -10,7 +10,7 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 PACKAGED_ROOT = PLUGIN_ROOT / "harness" / "resources"
-SOURCE_DIRS = ("config", "references")
+SOURCE_DIRS = ("config", "references", "workshop")
 
 
 def _files_below(root: Path, directory: str) -> dict[Path, Path]:

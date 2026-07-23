@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "session": {
+    "id": "relay-direction-01",
+    "stage": "direction",
+    "eyebrow": "Choose the operating voice",
+    "title": "How should urgency feel?",
+    "intro": "Relay has to make ownership unmistakable without making every incident feel catastrophic. Compare the hierarchy, language, and interaction—not just the color.",
+    "submit_label": "Use this direction"
+  },
+  "context": {
+    "product": "Relay incident handoff",
+    "product_job": "Help the next on-call engineer understand what changed, who owns the response, and what must happen now.",
+    "audience": "Engineers receiving a live production incident, often tired, interrupted, and scanning under time pressure.",
+    "primary_action": "Acknowledge the incident and take ownership.",
+    "constraints": [
+      "Existing React application with a compact desktop shell",
+      "Must remain legible at 200% zoom and in high-contrast mode",
+      "Real incident titles and ownership language—no placeholder metrics"
+    ]
+  },
+  "questions": [
+    {
+      "id": "hierarchy",
+      "kind": "single",
+      "prompt": "Which hierarchy makes a live handoff feel decisive without becoming an alarm dashboard?",
+      "help": "Each specimen uses the same incident and action. Choose the reading order you trust when attention is fragmented.",
+      "required": true,
+      "allow_custom": true,
+      "options": [
+        {
+          "id": "command-brief",
+          "label": "Command brief",
+          "thesis": "A sharp editorial headline states the changed condition; restrained interface type carries the operational detail.",
+          "fit": "It gives the incident one memorable sentence before exposing the work, which helps a receiving engineer orient quickly.",
+          "change": "Incident state becomes the dominant line; ownership and elapsed time move into a quiet evidence row.",
+          "risk": "Large editorial type can feel theatrical if routine warnings receive the same treatment as an outage.",
+          "cost": "Moderate—new type roles and responsive hierarchy, familiar controls.",
+          "specimen": {
+            "kind": "page",
+            "kicker": "P1 · Payments API",
+            "title": "Retries are exhausting the write queue.",
+            "body": "Morgan handed off after isolating the regression to the eu-west workers. No customer data has been lost.",
+            "primary_action": "Take ownership",
+            "secondary_action": "Read timeline",
+            "details": ["Started 18m ago", "Owner Morgan L.", "3 affected workers", "Runbook attached"],
+            "annotation": "The incident sentence leads; severity supports it instead of becoming the whole personality.",
+            "style": {
+              "display_font": "serif",
+              "body_font": "grotesk",
+              "scale": "dramatic",
+              "density": "comfortable",
+              "palette": "signal",
+              "corners": "square",
+              "alignment": "left",
+              "depth": "lined",
+              "motion": "measured"
+            }
+          }
+        },
+        {
+          "id": "operations-ledger",
+          "label": "Operations ledger",
+          "thesis": "A compact, evidence-first surface lets timestamps, ownership, and system state establish trust before the action.",
+          "fit": "It matches how experienced responders read an incident: scan the facts, verify scope, then accept responsibility.",
+          "change": "The product becomes denser and more procedural, with a stable two-column fact rhythm and quieter titles.",
+          "risk": "It may make new responders work too hard to understand which fact matters most.",
+          "cost": "Low—mostly type, spacing, and information-order changes.",
+          "specimen": {
+            "kind": "density",
+            "kicker": "Incident 2841 / live",
+            "title": "Write queue retry exhaustion",
+            "body": "Scope confirmed in eu-west. Handoff notes and runbook checks are complete.",
+            "primary_action": "Acknowledge + own",
+            "secondary_action": "Open evidence",
+            "details": ["18:42 first alert", "18:51 regression found", "19:00 Morgan → you", "19:03 next check"],
+            "annotation": "The timeline is the interface spine; the action remains visually singular.",
+            "style": {
+              "display_font": "mono",
+              "body_font": "humanist",
+              "scale": "quiet",
+              "density": "compact",
+              "palette": "ink",
+              "corners": "square",
+              "alignment": "split",
+              "depth": "flat",
+              "motion": "still"
+            }
+          }
+        },
+        {
+          "id": "calm-relay",
+          "label": "Calm relay",
+          "thesis": "A human, measured interface treats handoff as a clear transfer between people rather than a machine shouting at both of them.",
+          "fit": "It can lower panic while keeping accountability explicit, especially for incidents that last across shifts.",
+          "change": "Ownership language and the next safe action lead; severity is confined to one strong signal line.",
+          "risk": "The softer tone could understate rare, truly catastrophic incidents unless severity escalation is proven separately.",
+          "cost": "Moderate—copy, state semantics, and escalation treatment need joint design.",
+          "specimen": {
+            "kind": "action",
+            "kicker": "Ready for handoff",
+            "title": "Morgan has prepared the next move.",
+            "body": "The retry source is isolated. Take ownership, then verify the queue after the worker restart.",
+            "primary_action": "I’ll take it",
+            "secondary_action": "Review the handoff",
+            "details": ["Payments API", "P1 severity", "Next check 19:03", "Morgan is available"],
+            "annotation": "Person-to-person language carries the transition; urgency stays in the evidence.",
+            "style": {
+              "display_font": "humanist",
+              "body_font": "humanist",
+              "scale": "balanced",
+              "density": "airy",
+              "palette": "forest",
+              "corners": "soft",
+              "alignment": "left",
+              "depth": "raised",
+              "motion": "measured"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "transfer",
+      "kind": "single",
+      "prompt": "What should the ownership transfer communicate at the decisive moment?",
+      "help": "This choice governs copy, motion, confirmation, and what remains visible after the handoff—not a decorative animation preference.",
+      "required": true,
+      "allow_custom": true,
+      "options": [
+        {
+          "id": "signed-transfer",
+          "label": "Signed transfer",
+          "thesis": "Treat acceptance like a signed operational event with a clear before, after, and durable timestamp.",
+          "fit": "Accountability is the product job, so the interaction should leave no ambiguity about who owns the next action.",
+          "change": "The control becomes a two-step confirmation only when the incident is P1; the resulting ownership record stays in view.",
+          "risk": "Extra confirmation becomes friction if applied to routine incidents.",
+          "cost": "Moderate—severity-aware confirmation and event persistence.",
+          "specimen": {
+            "kind": "interaction",
+            "kicker": "Transfer record",
+            "title": "You will own Incident 2841.",
+            "body": "Morgan remains attached for ten minutes. Your first verification is due at 19:03.",
+            "primary_action": "Confirm ownership",
+            "secondary_action": "Not ready",
+            "details": ["From Morgan L.", "To you", "P1 incident", "Recorded in timeline"],
+            "annotation": "One consequential confirmation; the completed state becomes evidence, not confetti.",
+            "style": {
+              "display_font": "grotesk",
+              "body_font": "grotesk",
+              "scale": "balanced",
+              "density": "comfortable",
+              "palette": "blueprint",
+              "corners": "square",
+              "alignment": "left",
+              "depth": "lined",
+              "motion": "measured"
+            }
+          }
+        },
+        {
+          "id": "continuous-relay",
+          "label": "Continuous relay",
+          "thesis": "Make transfer immediate, then keep the previous owner and next check visible so continuity matters more than ceremony.",
+          "fit": "Long incidents are collaborative; this avoids pretending responsibility changes in a single clean instant.",
+          "change": "Acceptance is one action, followed by a persistent handoff strip with both people and the next verification.",
+          "risk": "Immediate acceptance needs a strong undo or correction path for accidental taps.",
+          "cost": "Low to moderate—persistent state and a bounded correction path.",
+          "specimen": {
+            "kind": "interaction",
+            "kicker": "Ownership changed · just now",
+            "title": "You have the incident. Morgan is still here.",
+            "body": "Verify the queue at 19:03. Correct the owner from the timeline if this transfer was accidental.",
+            "primary_action": "Open next check",
+            "secondary_action": "Correct owner",
+            "details": ["You · current owner", "Morgan · available 10m", "Runbook step 4", "Queue trending down"],
+            "annotation": "The completion state preserves continuity and gives the next action a real home.",
+            "style": {
+              "display_font": "humanist",
+              "body_font": "grotesk",
+              "scale": "quiet",
+              "density": "compact",
+              "palette": "forest",
+              "corners": "soft",
+              "alignment": "split",
+              "depth": "flat",
+              "motion": "still"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

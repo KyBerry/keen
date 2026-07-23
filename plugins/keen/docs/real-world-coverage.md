@@ -21,7 +21,7 @@ look good.
 
 ## Per-site results
 
-| Site | Slug | Status | Elements (DOM) | Components | Truncated? | Screenshot | Grade* | Top findings |
+| Site | Slug | Status | Elements (DOM) | Components | Truncated? | Screenshot | Signal band* | Candidate findings |
 |---|---|---|---:|---:|---|---:|:---:|---:|
 | m3.material.io | `m3` | ✓ captures | 327 | 97 | no | 144 KB | F | 15 |
 | developer.apple.com/design | `apple` | ✓ captures | 593 | 279 | no | 392 KB | F | 15 |
@@ -70,7 +70,7 @@ the more focused above-the-fold content, OR adding a future
 `--max-elements N` CLI flag (intentionally not added this pass to avoid CLI
 churn).
 
-### 3. Damage score missing from `report.json`
+### 3. Weighted candidate index missing from `report.json`
 **Observed on:** all 10 sites (and example.com).
 
 `report.json` has `score.grade` but `score.damage` is `None`. The grade is

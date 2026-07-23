@@ -52,7 +52,7 @@ _PAGE_CAPTURE = "page"
 #   P2 = WCAG AAA, polish, or heuristic/uncertain finding
 PREDICATE_SEVERITIES: dict[str, str] = {
     # Existing predicates (read off harness/analyze.py at the time of audit).
-    "hit-target.size": "P1",  # named-system conformance above the WCAG AA floor
+    "hit-target.size": "P2",  # named-system preference, not generic WCAG conformance
     "contrast.text": "P0",  # WCAG 2.2 SC 1.4.3 AA
     "name.icon-button": "P0",  # WCAG SC 4.1.2 A
     "name.link": "P0",  # WCAG SC 4.1.2 A
@@ -65,11 +65,11 @@ PREDICATE_SEVERITIES: dict[str, str] = {
     "input.numeric-mode": "P2",  # Mobile UX nicety, not a WCAG failure
     "heading.hierarchy": "P1",  # WCAG SC 1.3.1 / 2.4.6 partial
     "heading.empty": "P0",  # WCAG SC 2.4.6 / 4.1.2 A
-    "heading.duplicate-h1": "P1",  # SEO + heading-structure drift
-    "link.distinguishable": "P1",  # WCAG SC 1.4.1 A
+    "heading.duplicate-h1": "P2",  # permitted HTML pattern; document-outline review
+    "link.distinguishable": "P2",  # incomplete heuristic; needs surrounding-text evidence
     "spacing.grid": "P2",  # Design-system drift
     "layout.off-canvas": "P1",  # WCAG SC 1.4.10 AA
-    "tap-target.overlap": "P1",  # WCAG SC 2.5.8 AA spacing exception
+    "tap-target.overlap": "P1",  # legacy reports; new runs emit target.size-aa
     "dialog.aria-modal": "P1",  # WAI ARIA APG
     "visual-dom.background-mismatch": "P1",  # Internal cross-check
     # --- New in this audit pass ---
@@ -478,6 +478,19 @@ def top_findings(
     flat: list[dict] = []
     for c in analysis["components"]:
         for f in c.get("findings", []):
+            box = c.get("box") or {}
+            left = float(box.get("x") or 0)
+            top = float(box.get("y") or 0)
+            right = left + float(box.get("w") or 0)
+            bottom = top + float(box.get("h") or 0)
+            capture_width = float(c.get("capture_width") or c.get("viewport_width") or 0)
+            capture_height = float(c.get("capture_height") or 0)
+            visible_in_capture = (
+                right > 0
+                and bottom > 0
+                and (capture_width <= 0 or left < capture_width)
+                and (capture_height <= 0 or top < capture_height)
+            )
             flat.append(
                 {
                     **f,
@@ -485,7 +498,9 @@ def top_findings(
                     "viewport": c.get("viewport"),
                     "state": c.get("state"),
                     "component_index": c.get("index"),
+                    "capture_path": c.get("capture_path"),
                     "crop_path": c.get("crop_path"),
+                    "visible_in_capture": visible_in_capture,
                 }
             )
     for finding in analysis.get("global_findings", []) or []:
@@ -497,7 +512,13 @@ def top_findings(
                 "state": None,
             }
         )
-    flat.sort(key=lambda x: (severity_rank.get(x["severity"], 9), x.get("predicate_id", "")))
+    flat.sort(
+        key=lambda x: (
+            severity_rank.get(x["severity"], 9),
+            not bool(x.get("visible_in_capture", False)),
+            x.get("predicate_id", ""),
+        )
+    )
 
     out: list[dict] = []
     if limit <= 0:

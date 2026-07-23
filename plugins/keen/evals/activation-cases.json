@@ -1,103 +1,101 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "cases": [
     {
-      "id": "natural-full-review",
+      "id": "natural-blank-canvas",
       "mode": "natural",
-      "prompt": "Give this rendered dashboard a full UX review and prioritize the three highest-leverage corrections.",
-      "expected_skill": "ui-review",
-      "system_creation_allowed": false
+      "prompt": "We are starting from nothing. Research thoughtful references and make a moodboard with three distinct visual directions for this developer tool.",
+      "expected_skill": "explore",
+      "design_context_write_allowed": false,
+      "product_source_edit_allowed": false
     },
     {
-      "id": "natural-capture-only",
+      "id": "natural-save-moodboard",
       "mode": "natural",
-      "prompt": "Capture this local route at mobile and desktop widths, but do not critique it yet.",
-      "expected_skill": "ui-capture",
-      "system_creation_allowed": false
+      "prompt": "Create a moodboard for this product and save the chosen influences and anti-patterns so future agents can use them.",
+      "expected_skill": "explore",
+      "design_context_write_allowed": true,
+      "product_source_edit_allowed": false
     },
     {
-      "id": "natural-existing-audit",
+      "id": "natural-existing-product-foundation",
       "mode": "natural",
-      "prompt": "Reanalyze this existing Keen run from the stored screenshots and DOM evidence without recapturing.",
-      "expected_skill": "ui-audit",
-      "system_creation_allowed": false
+      "prompt": "We are halfway through this product. Extract its visual language, reconcile the inconsistencies, and establish a durable design direction.",
+      "expected_skill": "establish",
+      "design_context_write_allowed": true,
+      "product_source_edit_allowed": false
     },
     {
-      "id": "natural-system-compare",
+      "id": "natural-system-from-direction",
       "mode": "natural",
-      "prompt": "Compare this page against Material 3 and explain the largest conformance gaps.",
-      "expected_skill": "ui-compare",
-      "system_creation_allowed": false
+      "prompt": "Establish our selected direction as a coherent design system and record the rationale for future developers.",
+      "expected_skill": "establish",
+      "design_context_write_allowed": true,
+      "product_source_edit_allowed": false
     },
     {
-      "id": "natural-token-extraction",
+      "id": "natural-polish-review",
       "mode": "natural",
-      "prompt": "Extract the observed colors and design tokens from this screenshot and call out fragmentation.",
-      "expected_skill": "ui-tokens",
-      "system_creation_allowed": false
+      "prompt": "Review this nearly finished page and catch the small details that make it feel cheap, generic, or quickly slapped together.",
+      "expected_skill": "refine",
+      "design_context_write_allowed": false,
+      "product_source_edit_allowed": false
     },
     {
-      "id": "natural-ai-tells",
+      "id": "natural-build-page",
       "mode": "natural",
-      "prompt": "This interface looks AI-generated and generic. Find the strongest measurable tells and specific escape moves.",
-      "expected_skill": "ui-deslop",
-      "system_creation_allowed": false
+      "prompt": "Design and implement this pricing page so it follows our established direction, then verify the rendered result.",
+      "expected_skill": "refine",
+      "design_context_write_allowed": false,
+      "product_source_edit_allowed": true
     },
     {
-      "id": "natural-visual-signature",
+      "id": "natural-generic-ai-design",
       "mode": "natural",
-      "prompt": "Describe this product's measurable visual signature across density, type, color, shape, and depth.",
-      "expected_skill": "ui-taste",
-      "system_creation_allowed": false
+      "prompt": "Review this dashboard because it feels like generic AI design and needs a more thoughtful, product-specific treatment.",
+      "expected_skill": "refine",
+      "design_context_write_allowed": false,
+      "product_source_edit_allowed": false
     },
     {
-      "id": "natural-screen-job",
+      "id": "natural-maintenance-regression",
       "mode": "natural",
-      "prompt": "Reconcile this screen with the user's likely job and tell me where hierarchy fights the task.",
-      "expected_skill": "ui-intent",
-      "system_creation_allowed": false
+      "prompt": "Compare this finished product with the accepted maintenance baseline and find visual regressions or drift.",
+      "expected_skill": "guard",
+      "design_context_write_allowed": false,
+      "product_source_edit_allowed": false
     },
     {
-      "id": "natural-systemize-run",
+      "id": "natural-accept-new-baseline",
       "mode": "natural",
-      "prompt": "Turn this captured Keen run into a coherent design-system proposal and inspect the responsive preview.",
-      "expected_skill": "ui-systemize",
-      "system_creation_allowed": true
+      "prompt": "The redesign is approved. Update the maintenance baseline and record the consequential direction change.",
+      "expected_skill": "guard",
+      "design_context_write_allowed": true,
+      "product_source_edit_allowed": false
     },
     {
-      "id": "natural-create-seed",
+      "id": "negative-performance-refactor",
       "mode": "natural",
-      "prompt": "Create and validate a new design system from the seed color #0A4D8C, then render a responsive review sheet.",
-      "expected_skill": "ui-create",
-      "system_creation_allowed": true
-    },
-    {
-      "id": "natural-remix-inspiration",
-      "mode": "natural",
-      "prompt": "Use this measured site as inspiration, but remix it into a distinct system with a different color family and shape language.",
-      "expected_skill": "ui-remix",
-      "system_creation_allowed": true
-    },
-    {
-      "id": "negative-source-implementation",
-      "mode": "natural",
-      "prompt": "Refactor this React component to reduce rerenders and add unit tests.",
+      "prompt": "Refactor this data loader to reduce database queries and add unit tests.",
       "expected_skill": null,
-      "system_creation_allowed": false
+      "design_context_write_allowed": false,
+      "product_source_edit_allowed": false
     },
     {
-      "id": "explicit-codex-review",
+      "id": "explicit-codex-refine",
       "mode": "explicit",
-      "prompt": "Use $keen:ui-review to review this rendered route and do not edit product source.",
-      "expected_skill": "ui-review",
-      "system_creation_allowed": false
+      "prompt": "Use $keen:refine to review this rendered route and do not edit product source.",
+      "expected_skill": "refine",
+      "design_context_write_allowed": false,
+      "product_source_edit_allowed": false
     },
     {
-      "id": "explicit-claude-create",
+      "id": "explicit-claude-explore",
       "mode": "explicit",
-      "prompt": "Use /keen:ui-create from-seed #C45432 clarity-first and keep output in the project.",
-      "expected_skill": "ui-create",
-      "system_creation_allowed": true
+      "prompt": "Use /keen:explore to make and save a moodboard for this new product.",
+      "expected_skill": "explore",
+      "design_context_write_allowed": true,
+      "product_source_edit_allowed": false
     }
   ]
 }

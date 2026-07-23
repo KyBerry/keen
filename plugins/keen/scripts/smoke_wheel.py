@@ -53,7 +53,7 @@ def _assert_wheel_contents(wheel: Path) -> None:
         "harness/templates/report.html.tmpl",
         *{
             f"harness/resources/{path.relative_to(PLUGIN_ROOT).as_posix()}"
-            for directory in ("config", "references")
+            for directory in ("config", "references", "workshop")
             for path in (PLUGIN_ROOT / directory).rglob("*")
             if path.is_file()
         },
@@ -166,6 +166,12 @@ def main() -> int:
             raise RuntimeError(
                 f"installed wheel did not discover canonical systems: {sorted(systems)}"
             )
+
+        workshop_schema = json.loads(
+            _run([str(keen), "workshop", "schema", "spec"], cwd=temp_root, capture=True)
+        )
+        if workshop_schema.get("title") != "Keen direction workshop spec":
+            raise RuntimeError("installed CLI did not load the packaged workshop schema")
 
         report_dir = temp_root / "report"
         report_code = """

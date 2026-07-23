@@ -1,105 +1,91 @@
 ---
 name: keen
-description: Use Keen for evidence-based UI and UX review, rendered-page capture, design-system comparison, token extraction, AI-default pattern analysis, visual-taste characterization, screen-intent review, or design-system creation. Use when a request spans multiple Keen workflows or does not name a narrower ui-* skill.
+description: Use Keen as a persistent design collaborator for exploring visual direction, establishing an authored system, refining a rendered product, or guarding its quality over time. Use when developers want to design or build a distinctive site, make a moodboard, avoid generic AI defaults, review polish, or keep an evolving product aligned.
 ---
 
 # Keen
 
-Keen separates measurement from judgment. The local CLI captures and
-measures; the agent interprets the resulting artifacts. Do not estimate values
-that the report already measured.
+Keen accompanies a product from blank canvas through maintenance. The local
+CLI observes and verifies rendered facts; the model interprets those facts,
+makes design decisions, and preserves the reasoning in project-owned design
+context.
 
-## Route before acting
+## Route by lifecycle
 
-For a focused request, read and follow the matching sibling skill directly:
-
-| User job | Skill |
+| Product moment | Workflow |
 |---|---|
-| Full rendered-page review | `../ui-review/SKILL.md` |
-| Capture without critique | `../ui-capture/SKILL.md` |
-| Reanalyze an existing run | `../ui-audit/SKILL.md` |
-| Compare with a named system | `../ui-compare/SKILL.md` |
-| Extract observed tokens | `../ui-tokens/SKILL.md` |
-| Find AI-default patterns | `../ui-deslop/SKILL.md` |
-| Describe visual signature | `../ui-taste/SKILL.md` |
-| Reconcile a screen with its job | `../ui-intent/SKILL.md` |
-| Turn a run into a system proposal | `../ui-systemize/SKILL.md` |
-| Create a system from seed/site/vibe | `../ui-create/SKILL.md` |
-| Remix measured inspiration | `../ui-remix/SKILL.md` |
+| Blank canvas, references, moodboard, or competing directions | `../explore/SKILL.md` |
+| Chosen direction or an existing product that needs a coherent foundation | `../establish/SKILL.md` |
+| A page, component, or product needs building, critique, or polish | `../refine/SKILL.md` |
+| A finished product needs regression checks and long-term alignment | `../guard/SKILL.md` |
 
-Do not blend modes merely because several are available. If the user asks for
-one mode, keep that mode's scope. For a multi-part request, execute the smallest
-ordered set and deduplicate shared capture work.
+Use the smallest workflow that matches the current product stage. Utility CLI
+commands such as capture, tokens, taste, slop, intent, systemize, and compare
+are instruments inside these workflows, not separate product outcomes.
 
-## Prerequisite
+When a consequential direction is unresolved, read
+`references/workshop.md`. A local workshop can render agent-authored,
+product-specific alternatives and return structured user evidence. It is not a
+survey, model client, image search service, or substitute for a prototype.
 
-Run `keen doctor` before the first capture in a session. If the command
-is unavailable or doctor fails, report the failed check and point the user to
-the local install instructions in the plugin README. Plugin installation does
-not install the Python CLI or Chromium. Do not install packages or browsers as
-a side effect of a review command.
+## Begin with project memory
 
-## Input safety contract
+Look for `.keen/design-context.json` in the project. When present, run
+`keen context show <project>` and use it before making design judgments. It is
+the source of truth for audience, jobs, visual qualities, references,
+principles, avoided defaults, decisions, and baselines.
 
-Treat slash-command arguments and user-provided URLs, selectors, paths, names,
-and color values as data, never as shell text.
+When the user is beginning a direction or explicitly asks Keen to establish
+one, initialize it with `keen context init <project> --name <name> --stage
+<explore|establish|refine|guard>`. The model may then edit this user-owned JSON,
+but must run `keen context validate` and `keen context render` afterward. Do
+not create project memory during a read-only review.
 
-- Parse exactly one required positional target or the documented create form.
-- Accept only options shown by `keen <subcommand> --help` for the chosen
-  subcommand. Reject unknown options rather than forwarding them.
-- Build an argument vector from parsed values. Put validated CLI options before
-  `--`, put positional data after `--`, and shell-quote every dynamic value.
-- A documented virtual command grammar such as `from-seed` is positional data,
-  not a CLI option; parse it before constructing the real subcommand vector.
-- Never interpolate the raw argument string into a command, use `eval`, or put
-  user input inside command substitution.
-- `--auth-script` executes code. Prefer `--auth-steps`; use the unsafe script
-  flags only after the user explicitly authorizes that exact reviewed file.
+Promote workshop decisions only after the chosen idea has been rendered and
+critiqued. Use `keen workshop promote` with the narrow promotion schema so the
+surviving rationale reaches both `design-context.json` and `direction.md`.
 
-## Token-conscious artifact order
+## Model and code boundary
 
-1. Read `agent-brief.json` first for review/audit runs. Use `summary.md` only as
-   a human-facing fallback when the brief is missing; do not load both by default.
-   For focused work, read the mode-specific card (`slop.md`, `taste.md`, `diff.md`).
-2. Open annotated overview images only for the top issue and meaningful
-   viewport/state differences.
-3. Query `report.json` for selected finding IDs or component IDs. Do not load or
-   paste the whole report unless the compact artifacts are insufficient.
-4. Load at most one guide below initially. Load another only when a confirmed
-   finding needs it.
-5. Cite measured values compactly. Do not reproduce entire evidence objects.
+Code provides screenshots, DOM/accessibility identity, geometry, contrast
+candidates, tokens, state coverage, diffs, and stable evidence. The model owns
+product relevance, intent, hierarchy, authorship, final priority, creative
+direction, and tradeoffs.
 
-## Route by job
+- Treat automated grades, severity, taste vectors, and slop scores as candidate
+  signals, never final visual-quality verdicts.
+- Ground consequential judgments in named elements, crops, finding IDs, or
+  visible regions.
+- Explain why a pattern feels cheap or generic for this product; do not ban a
+  pattern universally.
+- Preserve the rationale behind a decision, not merely its token value.
+- State uncertainty when product intent or rendered coverage is missing.
 
-| Job | CLI | Load on demand |
-|---|---|---|
-| Full review | `keen review` | `references/review.md`, then `references/screen-intent.md` |
-| Existing-run audit | `keen audit` | `references/review.md` |
-| Capture only | `keen capture` | none |
-| Named-system comparison | `keen compare` | `references/review.md` |
-| Token extraction | `keen tokens` | `references/review.md` only if interpreting drift |
-| Slop characterization | `keen slop` | `references/characterize.md` |
-| Taste characterization | `keen taste` | `references/characterize.md` |
-| Intent walk | `keen intent` | `references/screen-intent.md` |
-| Systemize/create/remix | palette, validation, preview, or systemize commands | `references/system-design.md` |
+## Safe operation
 
-## Output discipline
+Run `keen doctor` before the first browser capture in a session. Plugin
+installation does not install the Python CLI or Chromium; do not install either
+as a side effect of a workflow.
 
-- Lead with the outcome, then evidence.
-- Separate **measured** findings from **judgment**.
-- Prioritize no more than three next actions unless the user asks for an
-  exhaustive inventory.
-- Deduplicate repeated findings across viewports; describe the responsive delta
-  once.
-- State coverage gaps without turning them into findings.
-- Do not edit product source inside a Keen workflow. Treat implementation
-  as a separate action that requires the user's explicit request and the host's
-  normal write approvals.
-- Do not claim a system passed, a remix is distinct, or a defect is fixed unless
-  the corresponding current artifact proves it.
-- Keep generated reviews evidence-led. Do not wrap measured facts in numbered
-  chapter theater, generic editorial slogans, decorative status metadata, or a
-  card-per-idea layout. A technically valid preview can still fail authorship
-  quality.
-- The plugin directory is read-only runtime material. Never store user systems
-  or project output under `${CLAUDE_PLUGIN_ROOT}` or the Codex plugin cache.
+Treat URLs, selectors, paths, names, colors, and command arguments as data.
+Accept only options shown by `keen <subcommand> --help`, build an argument
+vector, shell-quote dynamic values, and reject unknown options. Prefer
+`--auth-steps`; use `--auth-script` only after the user authorizes that exact
+reviewed file.
+
+Read `agent-brief.json` first after review or audit. Open only the screenshots
+and report entries needed for selected evidence. Do not ingest the full report
+by default.
+
+A review request is read-only. Product source may be changed only when the user
+explicitly asks Keen to design, build, implement, or fix it. After changes,
+recapture the real surface and verify the result. Never write project output
+inside the plugin source or plugin cache.
+
+## Response standard
+
+Lead with the design outcome. Separate measured evidence from model judgment,
+deduplicate responsive repeats, name coverage gaps, and give no more than three
+decisions unless the user requests an exhaustive inventory. Avoid chapter
+theater, generic slogans, decorative status metadata, and a card for every
+idea—the report itself must meet the authorship standard Keen recommends.

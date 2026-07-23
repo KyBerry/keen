@@ -315,6 +315,8 @@ def _render_findings_table(top_findings: Iterable[dict[str, Any]]) -> str:
         return '<p class="empty" role="status">No findings to display.</p>'
     rows: list[str] = []
     for f in findings:
+        finding_id = str(f.get("finding_id") or "")
+        annotation_id = str(f.get("annotation_id") or "")
         sev = str(f.get("severity", "P2"))
         sev_rank = _SEVERITY_RANK.get(sev, 9)
         pid = str(f.get("predicate_id", ""))
@@ -329,18 +331,24 @@ def _render_findings_table(top_findings: Iterable[dict[str, Any]]) -> str:
         )
         loc = f"{viewport}/{state}" if viewport or state else ""
         link_html = ""
+        if annotation_id:
+            link_html += (
+                f' <a class="evidence-link" href="#annotation-{html.escape(annotation_id, quote=True)}">'
+                f"locate {html.escape(annotation_id)}</a>"
+            )
         if target_id:
             # Visible label "view" must appear in the accessible name (WCAG 2.5.3
             # Label in Name). Putting "view" first satisfies the speech-input
             # check and the longer phrase still gives context to screen readers.
-            link_html = (
+            link_html += (
                 f' <a class="row-link" href="#{html.escape(target_id, quote=True)}" '
                 f'aria-label="view {html.escape(kind)} component">view</a>'
             )
         elif crop:
-            link_html = f" <code>{html.escape(crop)}</code>"
+            link_html += f" <code>{html.escape(crop)}</code>"
+        row_id = f' id="{html.escape(finding_id, quote=True)}"' if finding_id else ""
         rows.append(
-            "<tr>"
+            f"<tr{row_id}>"
             f'<td data-sort-value="{sev_rank}">'
             f'<span class="badge badge-{html.escape(sev)}" aria-label="severity {html.escape(sev)}">{html.escape(sev)}</span>'
             "</td>"
@@ -365,12 +373,13 @@ def _render_findings_table(top_findings: Iterable[dict[str, Any]]) -> str:
         "</tr></thead>"
     )
     body = "<tbody>" + "".join(rows) + "</tbody>"
-    return f'<table class="findings" aria-label="Top findings, sortable">{head}{body}</table>'
+    return f'<table class="findings" aria-label="Candidate findings, sortable">{head}{body}</table>'
 
 
 def _render_gallery(
     captures: list[dict[str, Any]],
     annotated: dict[str, str],
+    annotations: dict[str, list[dict[str, Any]]],
     captures_dir: Path,
     *,
     link_images: bool,
@@ -390,6 +399,9 @@ def _render_gallery(
             annot_rel = annotated.get(stem)
             if annot_rel:
                 annot_src = _image_src(captures_dir, annot_rel, link_images=link_images)
+        else:
+            stem = ""
+        marker_entries = list(annotations.get(stem) or [])
 
         if not raw_src and not annot_src:
             continue
@@ -402,17 +414,32 @@ def _render_gallery(
         )
         wrap_id = f"shot-{idx}"
         figure_parts: list[str] = []
-        figure_parts.append("<figure>")
+        figure_parts.append(f'<figure id="screen-{idx}">')
         figure_parts.append(
             "<figcaption>"
+            '<span class="screen-label">'
             f'<span class="vp-label">{html.escape(viewport)}'
             f"{(' / ' + html.escape(state)) if state else ''}{manual_tag}</span>"
+            f'<span class="screen-count">{len(marker_entries)} mapped priorit'
+            f"{'y' if len(marker_entries) == 1 else 'ies'}</span>"
+            "</span>"
+            '<span class="screen-actions">'
         )
         if annot_src and raw_src:
             figure_parts.append(
                 f'<button type="button" class="toggle-btn" data-toggle-target="{wrap_id}" '
-                'aria-pressed="false">Show annotated</button>'
+                'aria-pressed="false">Show evidence map</button>'
             )
+        figure_parts.append(
+            f'<button type="button" class="inspect-btn" data-inspect-target="{wrap_id}" '
+            'aria-pressed="false">Inspect detail</button>'
+        )
+        if raw_src:
+            figure_parts.append(
+                f'<a class="full-image-link" href="{raw_src}" target="_blank" '
+                'rel="noopener">Open image</a>'
+            )
+        figure_parts.append("</span>")
         figure_parts.append("</figcaption>")
         figure_parts.append(f'<div class="img-wrap" id="{wrap_id}">')
         # Default visible: raw screenshot; annotated hidden until toggled.
@@ -428,6 +455,26 @@ def _render_gallery(
                 'with bounding boxes" hidden loading="lazy">'
             )
         figure_parts.append("</div>")
+        if marker_entries:
+            figure_parts.append('<ol class="annotation-key" aria-label="Mapped priority findings">')
+            for marker in marker_entries:
+                annotation_id = str(marker.get("id") or "")
+                severity = str(marker.get("severity") or "P1")
+                predicates = ", ".join(str(value) for value in (marker.get("predicate_ids") or []))
+                message = str(marker.get("message") or "")
+                finding_ids = marker.get("finding_ids") or []
+                href = f"#{finding_ids[0]}" if finding_ids else "#findings"
+                figure_parts.append(
+                    f'<li id="annotation-{html.escape(annotation_id, quote=True)}">'
+                    f'<a href="{html.escape(href, quote=True)}">'
+                    f'<span class="annotation-marker badge-{html.escape(severity)}">'
+                    f"{html.escape(annotation_id)}</span>"
+                    '<span class="annotation-copy">'
+                    f"<strong>{html.escape(severity)} · {html.escape(predicates)}</strong>"
+                    f"<span>{html.escape(message)}</span>"
+                    "</span></a></li>"
+                )
+            figure_parts.append("</ol>")
         figure_parts.append("</figure>")
         figs.append("".join(figure_parts))
     if not figs:
@@ -437,15 +484,74 @@ def _render_gallery(
 
 def _render_components(
     components: list[dict[str, Any]],
+    top_findings: list[dict[str, Any]],
     captures_dir: Path,
     *,
     link_images: bool,
+    limit: int = 24,
 ) -> str:
     flagged = [c for c in components if c.get("findings")]
     if not flagged:
         return '<p class="empty" role="status">No flagged components.</p>'
+
+    by_key = {
+        (str(component.get("capture_path") or ""), component.get("index")): component
+        for component in flagged
+    }
+    selected: list[dict[str, Any]] = []
+    selected_keys: set[tuple[str, Any]] = set()
+
+    def add(component: dict[str, Any]) -> None:
+        key = (str(component.get("capture_path") or ""), component.get("index"))
+        if key not in selected_keys and len(selected) < limit:
+            selected.append(component)
+            selected_keys.add(key)
+
+    # Every component linked from the bounded findings table must exist in the
+    # evidence section. This keeps table links truthful while avoiding a
+    # hundred-card appendix dominated by one repeated heuristic.
+    for finding in top_findings:
+        key = (
+            str(finding.get("capture_path") or ""),
+            finding.get("component_index"),
+        )
+        component = by_key.get(key)
+        if component is not None:
+            add(component)
+
+    severity_rank = {"P0": 0, "P1": 1, "P2": 2}
+
+    def card_rank(component: dict[str, Any]) -> tuple[int, str, str, int]:
+        findings = component.get("findings") or []
+        best = min(
+            (severity_rank.get(str(finding.get("severity") or "P2"), 9) for finding in findings),
+            default=9,
+        )
+        predicates = sorted(str(finding.get("predicate_id") or "") for finding in findings)
+        return (
+            best,
+            predicates[0] if predicates else "",
+            str(component.get("capture_path") or ""),
+            int(component.get("index") or 0),
+        )
+
+    predicate_counts: dict[str, int] = {}
+    for component in sorted(flagged, key=card_rank):
+        if len(selected) >= limit:
+            break
+        predicates = {
+            str(finding.get("predicate_id") or "") for finding in (component.get("findings") or [])
+        }
+        if predicates and all(predicate_counts.get(pid, 0) >= 3 for pid in predicates):
+            continue
+        before = len(selected)
+        add(component)
+        if len(selected) > before:
+            for predicate_id in predicates:
+                predicate_counts[predicate_id] = predicate_counts.get(predicate_id, 0) + 1
+
     cards: list[str] = []
-    for c in flagged:
+    for c in selected:
         idx = c.get("index")
         kind = str(c.get("component_kind", ""))
         viewport = str(c.get("viewport", "") or "")
@@ -489,7 +595,14 @@ def _render_components(
             "</article>"
         )
         cards.append(card)
-    return '<div class="component-list">' + "".join(cards) + "</div>"
+    note = (
+        f'<p class="evidence-summary">Showing {len(selected)} representative components '
+        f"from {len(flagged)} flagged. The complete inventory remains in "
+        "<code>report.json</code>.</p>"
+        if len(selected) < len(flagged)
+        else ""
+    )
+    return note + '<div class="component-list">' + "".join(cards) + "</div>"
 
 
 def _component_anchor(viewport: str, state: str, index: Any) -> str:
@@ -648,30 +761,30 @@ def _render_verdict(
         return int(value) if isinstance(value, (int, float)) else 0
 
     p0, p1, p2 = count("P0"), count("P1"), count("P2")
-    grade_summary = str(
-        score.get("grade_summary") or "The automated evidence is ready for a reviewer decision."
-    )
     coverage = report.get("coverage") or {}
     complete = bool(coverage.get("complete", True))
     capture_status = "complete" if complete else "provisional"
+    total = p0 + p1 + p2
+    signal_copy = (
+        f"The harness found {total} deterministic candidate signal{'s' if total != 1 else ''}. "
+        "They locate evidence; they do not decide whether the product is beautiful, coherent, or ready."
+    )
     guidance = (
-        f"Resolve the {p0} blocking finding{'s' if p0 != 1 else ''} first, then review the supporting capture evidence."
-        if p0
-        else "No blocking findings were detected. Review the supporting evidence before shipping."
+        "Use project direction and rendered context to assign user impact and final priority."
     )
     return (
         '<div class="verdict-lead">'
-        '<p class="verdict-kicker">Decision signal</p>'
-        f'<p class="verdict-copy">{html.escape(grade_summary)}</p>'
+        '<p class="verdict-kicker">Automated evidence</p>'
+        f'<p class="verdict-copy">{html.escape(signal_copy)}</p>'
         "</div>"
         '<dl class="verdict-facts">'
-        f"<div><dt>P0 blockers</dt><dd>{p0}</dd></div>"
-        f"<div><dt>P1 risks</dt><dd>{p1}</dd></div>"
-        f"<div><dt>P2 refinements</dt><dd>{p2}</dd></div>"
+        f"<div><dt>P0 candidates</dt><dd>{p0}</dd></div>"
+        f"<div><dt>P1 candidates</dt><dd>{p1}</dd></div>"
+        f"<div><dt>P2 candidates</dt><dd>{p2}</dd></div>"
         f"<div><dt>Capture coverage</dt><dd>{len(captures)} / {html.escape(capture_status)}</dd></div>"
         "</dl>"
         f'<p class="verdict-guidance">{html.escape(guidance)}</p>'
-        '<a class="verdict-link" href="#findings">Review priority findings <span aria-hidden="true">→</span></a>'
+        '<a class="verdict-link" href="#findings">Inspect candidate evidence <span aria-hidden="true">→</span></a>'
     )
 
 
@@ -714,11 +827,13 @@ def render_report(
     gallery_html = _render_gallery(
         captures,
         dict(report.get("annotated_overviews") or {}),
+        dict(report.get("annotations") or {}),
         captures_dir,
         link_images=link_images,
     )
     components_html = _render_components(
         list(report.get("components") or []),
+        list(report.get("top_findings") or []),
         captures_dir,
         link_images=link_images,
     )

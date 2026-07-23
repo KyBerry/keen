@@ -265,6 +265,13 @@ table.findings th:not([aria-sort]) .sort-indicator::after { content: "↕"; colo
   margin-left: 6px;
   font-weight: 700;
 }
+.evidence-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  margin-left: 8px;
+  font: 700 11px/1 var(--mono);
+}
 .badge {
   display: inline-flex;
   align-items: center;
@@ -277,7 +284,7 @@ table.findings th:not([aria-sort]) .sort-indicator::after { content: "↕"; colo
 .badge-P0 { color: var(--p0); background: var(--p0-bg); }
 .badge-P1 { color: var(--p1); background: var(--p1-bg); }
 .badge-P2 { color: var(--p2); background: var(--p2-bg); }
-.gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 500px), 1fr)); gap: 28px; }
+.gallery { display: grid; grid-template-columns: minmax(0, 1fr); gap: 34px; }
 .gallery figure { margin: 0; background: var(--surface-elevated); border: 1px solid var(--border-subtle); }
 .gallery figcaption {
   display: flex;
@@ -288,10 +295,31 @@ table.findings th:not([aria-sort]) .sort-indicator::after { content: "↕"; colo
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-subtle);
 }
+.screen-label { display: grid; gap: 2px; }
 .vp-label { font-weight: 700; }
-.img-wrap { max-height: 680px; overflow: auto; background: var(--input-bg); }
-.gallery img { display: block; width: 100%; height: auto; }
-.toggle-btn {
+.screen-count { color: var(--ink-muted); font: 11px/1.4 var(--mono); }
+.screen-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
+.img-wrap {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  height: min(72vh, 720px);
+  padding: 14px;
+  overflow: hidden;
+  background: var(--input-bg);
+}
+.img-wrap img {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 100%;
+  object-fit: contain;
+  object-position: top center;
+}
+.img-wrap.is-inspecting { display: block; padding: 0; overflow: auto; }
+.img-wrap.is-inspecting img { width: 100%; max-width: none; max-height: none; object-fit: initial; }
+.toggle-btn, .inspect-btn, .full-image-link {
   min-width: 44px;
   min-height: 44px;
   padding: 8px 12px;
@@ -302,7 +330,38 @@ table.findings th:not([aria-sort]) .sort-indicator::after { content: "↕"; colo
   font: 700 12px/1 var(--mono);
   cursor: pointer;
 }
-.toggle-btn:hover, .toggle-btn[aria-pressed="true"] { background: var(--ink); color: var(--surface-base); }
+.full-image-link { display: inline-flex; align-items: center; color: var(--ink); text-decoration: underline; }
+.toggle-btn:hover, .toggle-btn[aria-pressed="true"],
+.inspect-btn:hover, .inspect-btn[aria-pressed="true"] { background: var(--ink); color: var(--surface-base); }
+.annotation-key { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--border-subtle); }
+.annotation-key li { scroll-margin-top: 24px; border-bottom: 1px solid var(--border-subtle); }
+.annotation-key li:last-child { border-bottom: 0; }
+.annotation-key li:target { background: var(--surface-panel); }
+.annotation-key a {
+  display: grid;
+  grid-template-columns: 50px minmax(0, 1fr);
+  gap: 12px;
+  min-height: 56px;
+  padding: 11px 14px;
+  color: var(--ink);
+  text-decoration: none;
+}
+.annotation-key a:hover { background: var(--surface-panel); }
+.annotation-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: start;
+  min-width: 44px;
+  min-height: 28px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  font: 750 11px/1 var(--mono);
+}
+.annotation-copy { display: grid; gap: 3px; min-width: 0; }
+.annotation-copy strong { font: 700 11px/1.4 var(--mono); }
+.annotation-copy span { color: var(--ink-muted); font-size: 13px; overflow-wrap: anywhere; }
+.evidence-summary { max-width: 72ch; margin: 0 0 18px; color: var(--ink-muted); }
 .component-list { border-top: 1px solid var(--border-strong); }
 .component-card {
   display: grid;
@@ -393,15 +452,19 @@ table.findings th:not([aria-sort]) .sort-indicator::after { content: "↕"; colo
     grid-column: 1;
     grid-row: 1 / span 4;
   }
+  .gallery figcaption { align-items: flex-start; flex-direction: column; }
+  .screen-actions { justify-content: flex-start; }
+  .img-wrap { height: min(68vh, 620px); }
 }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 @media print {
   .masthead { color: var(--ink); background: var(--surface-base); border-color: var(--ink); }
   .report-shell { display: block; padding: 0; }
-  .report-nav, .toggle-btn { display: none; }
+  .report-nav, .toggle-btn, .inspect-btn, .full-image-link { display: none; }
   main { padding: 18px; }
   .chapter, .component-card, .gallery figure { break-inside: avoid; }
-  .img-wrap { max-height: none; overflow: visible; }
+  .img-wrap { display: block; height: auto; max-height: none; padding: 0; overflow: visible; }
+  .img-wrap img { width: 100%; max-width: none; max-height: none; }
   a { color: inherit; text-decoration: none; }
 }
 </style>
@@ -416,9 +479,9 @@ table.findings th:not([aria-sort]) .sort-indicator::after { content: "↕"; colo
       <div><dt>Captured</dt><dd>$captured_at</dd></div>
       <div><dt>System</dt><dd>$target_system</dd></div>
     </dl>
-    <div class="verdict-strip" data-grade="$grade" aria-label="Review verdict">
-      <div class="metric"><span class="metric-label">Grade</span><span class="metric-value">$grade</span></div>
-      <div class="metric"><span class="metric-label">Damage</span><span class="metric-value">$damage</span></div>
+    <div class="verdict-strip" data-grade="$grade" aria-label="Automated signal summary">
+      <div class="metric"><span class="metric-label">Signal band</span><span class="metric-value">$grade</span></div>
+      <div class="metric"><span class="metric-label">Weighted index</span><span class="metric-value">$damage</span></div>
     </div>
   </div>
 </header>
@@ -426,8 +489,8 @@ table.findings th:not([aria-sort]) .sort-indicator::after { content: "↕"; colo
   <nav class="report-nav" aria-label="Report contents">
     <p class="nav-label">Contents</p>
     <ol>
-      <li><a href="#summary">Verdict</a></li>
-      <li><a href="#findings">Findings</a></li>
+      <li><a href="#summary">Signals</a></li>
+      <li><a href="#findings">Candidates</a></li>
       <li><a href="#gallery">Screens</a></li>
       <li><a href="#components">Evidence</a></li>
       <li><a href="#tokens">Tokens</a></li>
@@ -435,11 +498,11 @@ table.findings th:not([aria-sort]) .sort-indicator::after { content: "↕"; colo
   </nav>
   <main id="main" tabindex="-1">
     <section class="chapter" id="summary" aria-labelledby="summary-h">
-      <header class="chapter-head"><h2 id="summary-h">Verdict</h2></header>
+      <header class="chapter-head"><h2 id="summary-h">Automated signals</h2></header>
       <div class="summary-block">$summary_html</div>
     </section>
     <section class="chapter" id="findings" aria-labelledby="findings-h">
-      <header class="chapter-head"><h2 id="findings-h">Priority findings</h2></header>
+      <header class="chapter-head"><h2 id="findings-h">Candidate findings</h2></header>
       $findings_table_html
     </section>
     <section class="chapter" id="gallery" aria-labelledby="gallery-h">
@@ -494,11 +557,21 @@ table.findings th:not([aria-sort]) .sort-indicator::after { content: "↕"; colo
       if (!target) return;
       var annotated = button.getAttribute("aria-pressed") !== "true";
       button.setAttribute("aria-pressed", annotated ? "true" : "false");
-      button.textContent = annotated ? "Show raw" : "Show annotated";
+      button.textContent = annotated ? "Show raw" : "Show evidence map";
       target.querySelectorAll("[data-variant]").forEach(function (image) {
         var variant = image.getAttribute("data-variant");
         image.hidden = (annotated && variant !== "annotated") || (!annotated && variant !== "raw");
       });
+    });
+  });
+  document.querySelectorAll("[data-inspect-target]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var target = document.getElementById(button.getAttribute("data-inspect-target"));
+      if (!target) return;
+      var inspecting = !target.classList.contains("is-inspecting");
+      target.classList.toggle("is-inspecting", inspecting);
+      button.setAttribute("aria-pressed", inspecting ? "true" : "false");
+      button.textContent = inspecting ? "Fit overview" : "Inspect detail";
     });
   });
 })();

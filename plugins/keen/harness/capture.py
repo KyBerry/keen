@@ -66,6 +66,27 @@ MAX_SCREENSHOT_PIXELS = 16_000_000
 MAX_SCREENSHOT_WIDTH_PX = 8_000
 MAX_SCREENSHOT_HEIGHT_PX = 20_000
 
+_AX_NAME_TAGS = frozenset(
+    {
+        "a",
+        "button",
+        "details",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "img",
+        "input",
+        "select",
+        "summary",
+        "textarea",
+    }
+)
+_AX_MARKER_ATTR = "data-keen-ax-index"
+_AX_SNAPSHOT_CONCURRENCY = 20
+
 
 class CaptureFailure(RuntimeError):
     """Raised when one or more requested captures fail."""
@@ -78,6 +99,112 @@ def _browser_launch_failure_message(exc: Exception) -> str:
             "run `python -m playwright install chromium` with the same Python interpreter"
         )
     return f"could not launch Chromium: {exc}"
+
+
+def _parse_aria_snapshot_root(snapshot: str) -> tuple[str, str] | None:
+    """Extract the root role and computed name from a Playwright ARIA snapshot.
+
+    Playwright serializes an accessibility node as ``- role "name":``.  The
+    quoted name uses JSON-compatible escaping, so decoding it through
+    :func:`json.loads` preserves quotes and non-ASCII text without evaluating
+    page-controlled content.  ``None`` means the locator did not expose a root
+    accessibility node; an empty name is a valid parsed result.
+    """
+    if not isinstance(snapshot, str) or not snapshot.strip():
+        return None
+    first = snapshot.lstrip().splitlines()[0].strip()
+    match = re.match(
+        r'^-\s+([^\s:\[]+)(?:\s+"((?:[^"\\]|\\.)*)")?(?:\s+\[[^\]]*\])?:?$',
+        first,
+    )
+    if not match:
+        return None
+    role = match.group(1)
+    encoded_name = match.group(2)
+    if encoded_name is None:
+        return role, ""
+    try:
+        name = json.loads(f'"{encoded_name}"')
+    except json.JSONDecodeError:
+        # The snapshot grammar should remain JSON-compatible, but a graceful
+        # fallback keeps capture available if Playwright adds a new escape.
+        name = encoded_name.replace(r"\"", '"').replace(r"\\", "\\")
+    return role, str(name)
+
+
+async def _enrich_accessibility_names(page: Page, dom: dict[str, Any]) -> None:
+    """Replace heuristic names with names computed by the browser AX tree.
+
+    The in-page instrumentation retains the visible element array on a private
+    window property.  After the screenshot is written, this helper temporarily
+    marks only semantic/name-bearing elements, asks Playwright for each root
+    ARIA snapshot with bounded concurrency, then removes every marker.  The
+    screenshot therefore cannot be affected by the temporary attributes.
+
+    Failures are isolated per element.  A page re-render or unsupported node
+    falls back to the deterministic DOM heuristic already stored in ``name``.
+    """
+    elements = dom.get("elements")
+    if not isinstance(elements, list):
+        return
+    candidates = [
+        elem
+        for elem in elements
+        if isinstance(elem, dict)
+        and isinstance(elem.get("index"), int)
+        and (str(elem.get("tag") or "").lower() in _AX_NAME_TAGS or bool(elem.get("role")))
+    ]
+    if not candidates:
+        return
+
+    indices = [int(elem["index"]) for elem in candidates]
+    await page.evaluate(
+        """
+        ([indices, marker]) => {
+          const visible = window.__keenVisibleElements || [];
+          for (const index of indices) {
+            const element = visible[index];
+            if (element && element.isConnected) element.setAttribute(marker, String(index));
+          }
+        }
+        """,
+        [indices, _AX_MARKER_ATTR],
+    )
+
+    semaphore = asyncio.Semaphore(_AX_SNAPSHOT_CONCURRENCY)
+
+    async def enrich_one(elem: dict[str, Any]) -> None:
+        index = int(elem["index"])
+        selector = f'[{_AX_MARKER_ATTR}="{index}"]'
+        try:
+            async with semaphore:
+                snapshot = await page.locator(selector).aria_snapshot(timeout=1_500)
+        except Exception:
+            return
+        parsed = _parse_aria_snapshot_root(snapshot)
+        if parsed is None:
+            return
+        _role, name = parsed
+        elem["name"] = name
+        elem["nameSource"] = "browser-accessibility-tree"
+
+    try:
+        await asyncio.gather(*(enrich_one(elem) for elem in candidates))
+    finally:
+        await page.evaluate(
+            """
+            (marker) => {
+              const visible = window.__keenVisibleElements || [];
+              for (const element of visible) {
+                if (element && element.removeAttribute) element.removeAttribute(marker);
+              }
+              try { delete window.__keenVisibleElements; } catch (error) {
+                window.__keenVisibleElements = undefined;
+              }
+            }
+            """,
+            _AX_MARKER_ATTR,
+        )
 
 
 def _validate_artifact_id(value: str, *, kind: str) -> str:
@@ -318,6 +445,93 @@ INSTRUMENT_JS = r"""
     return '';
   }
 
+  const TEXT_OWNER_SELECTOR = [
+    'a', 'button', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'label', 'legend',
+    'input', 'select', 'textarea', '[role="button"]', '[role="link"]',
+    '[role="heading"]', '[role="tab"]', '[role="menuitem"]'
+  ].join(',');
+
+  function isPaintedTextNode(node) {
+    if (!node.nodeValue || !node.nodeValue.trim() || !node.parentElement) return false;
+    const parentStyles = getComputedStyle(node.parentElement);
+    if (parentStyles.display === 'none' || parentStyles.visibility === 'hidden'
+        || Number(parentStyles.opacity) === 0) return false;
+    const parentRect = node.parentElement.getBoundingClientRect();
+    if (parentRect.width <= 1 || parentRect.height <= 1) return false;
+    if ((parentStyles.clip && parentStyles.clip !== 'auto')
+        || (parentStyles.clipPath && parentStyles.clipPath !== 'none')) return false;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    return Array.from(range.getClientRects()).some(rect => {
+      let left = rect.left;
+      let right = rect.right;
+      let top = rect.top;
+      let bottom = rect.bottom;
+      let ancestor = node.parentElement;
+      while (ancestor && ancestor !== document.documentElement) {
+        const styles = getComputedStyle(ancestor);
+        const ancestorRect = ancestor.getBoundingClientRect();
+        if (styles.overflowX !== 'visible') {
+          left = Math.max(left, ancestorRect.left);
+          right = Math.min(right, ancestorRect.right);
+        }
+        if (styles.overflowY !== 'visible') {
+          top = Math.max(top, ancestorRect.top);
+          bottom = Math.min(bottom, ancestorRect.bottom);
+        }
+        ancestor = ancestor.parentElement;
+      }
+      return right - left > 1 && bottom - top > 1;
+    });
+  }
+
+  function visibleTextInfo(el, elementColor) {
+    if (el.tagName === 'INPUT'
+        && ['button', 'reset', 'submit'].includes((el.type || '').toLowerCase())
+        && (el.value || '').trim()) {
+      return { hasVisibleText: true, textStyleDivergent: false };
+    }
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const colors = new Set();
+    let hasVisibleText = false;
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (!isPaintedTextNode(node)) continue;
+      const owner = node.parentElement.closest(TEXT_OWNER_SELECTOR);
+      if (owner && owner !== el) continue;
+      hasVisibleText = true;
+      colors.add(getComputedStyle(node.parentElement).color);
+    }
+    return {
+      hasVisibleText,
+      textStyleDivergent: colors.size > 1 || (colors.size === 1 && !colors.has(elementColor)),
+    };
+  }
+
+  function isInlineTextLink(el, hasVisibleText) {
+    if (el.tagName !== 'A' || !hasVisibleText) return false;
+    const container = el.closest('p, li, dd, dt, figcaption, blockquote, td, th');
+    if (!container) return false;
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (el.contains(node)) continue;
+      if (isPaintedTextNode(node)) return true;
+    }
+    return false;
+  }
+
+  function hasHorizontalOverflowAncestor(el) {
+    let parent = el.parentElement;
+    while (parent && parent !== document.body && parent !== document.documentElement) {
+      const styles = getComputedStyle(parent);
+      const clipsX = ['auto', 'scroll', 'hidden', 'clip'].includes(styles.overflowX);
+      if (clipsX && parent.scrollWidth > parent.clientWidth + 1) return true;
+      parent = parent.parentElement;
+    }
+    return false;
+  }
+
   function pickStyles(el) {
     const cs = window.getComputedStyle(el);
     const out = {};
@@ -420,10 +634,23 @@ INSTRUMENT_JS = r"""
     if (visible.length >= MAX_ELEMENTS) { visibleTruncated = true; break; }
   }
 
+  // Retain element identity without mutating page markup. Python uses this
+  // array after the screenshot to ask Playwright for browser-computed ARIA
+  // names, then deletes it before the page closes.
+  try {
+    Object.defineProperty(window, '__keenVisibleElements', {
+      value: visible.map(entry => entry.el),
+      configurable: true,
+    });
+  } catch (error) {
+    window.__keenVisibleElements = visible.map(entry => entry.el);
+  }
+
   let focusedIndex = -1;
 
   for (const entry of visible) {
     const { el, rect, styles } = entry;
+    const textInfo = visibleTextInfo(el, styles.color);
 
     let parentIndex = -1;
     let p = el.parentElement;
@@ -466,8 +693,13 @@ INSTRUMENT_JS = r"""
       disabled: el.disabled || false,
       tabIndex: el.tabIndex,
       name: accessibleName(el),
+      nameSource: 'dom-heuristic',
       placeholder: el.getAttribute('placeholder') || null,
       text,
+      hasVisibleText: textInfo.hasVisibleText,
+      textStyleDivergent: textInfo.textStyleDivergent,
+      isInlineTextLink: isInlineTextLink(el, textInfo.hasVisibleText),
+      hasHorizontalOverflowAncestor: hasHorizontalOverflowAncestor(el),
       box: {
         x: Math.round(rect.x + window.scrollX),
         y: Math.round(rect.y + window.scrollY),
@@ -1408,20 +1640,62 @@ COMMON_BANNER_DISMISS: list[str] = [
     "#cookie-banner button.accept",
     "button.cc-accept",
     "button.cookie-accept",
+    '.govuk-cookie-banner button:has-text("Accept additional cookies")',
+]
+
+COMMON_BANNER_FOLLOWUP_DISMISS: list[str] = [
+    '.govuk-cookie-banner button:has-text("Hide cookie message")',
 ]
 
 
-async def _dismiss_common_banners(page: Page) -> str | None:
-    """Click the first matching consent-banner button. Returns the selector
-    used, or None if no banner was found."""
+@dataclass(frozen=True)
+class BannerDismissalResult:
+    """Machine-readable outcome for optional consent-banner handling."""
+
+    accepted_selector: str | None = None
+    followup_selector: str | None = None
+
+    @property
+    def dismissed(self) -> bool:
+        return self.accepted_selector is not None
+
+    def to_dict(self) -> dict[str, str | bool | None]:
+        return {
+            "dismissed": self.dismissed,
+            "accepted_selector": self.accepted_selector,
+            "followup_selector": self.followup_selector,
+        }
+
+
+async def _dismiss_common_banners(page: Page) -> BannerDismissalResult:
+    """Dismiss a known consent banner and any known confirmation state.
+
+    The closed selector lists avoid broad text matching, while the structured
+    result makes it possible to distinguish "requested but nothing matched"
+    from a capture that never attempted dismissal.
+    """
     for selector in COMMON_BANNER_DISMISS:
         try:
             await page.click(selector, timeout=500)
             logger.info("dismissed banner via selector: %s", selector)
-            return selector
-        except Exception:
+        # Each selector is a closed, best-effort probe; one mismatch must not
+        # prevent trying the next known consent-banner pattern.
+        except Exception:  # nosec B112
             continue
-    return None
+        await page.wait_for_timeout(150)
+        for followup_selector in COMMON_BANNER_FOLLOWUP_DISMISS:
+            try:
+                await page.click(followup_selector, timeout=500)
+                logger.info(
+                    "dismissed banner confirmation via selector: %s",
+                    followup_selector,
+                )
+                return BannerDismissalResult(selector, followup_selector)
+            # Confirmation controls vary independently of the first banner.
+            except Exception:  # nosec B112
+                continue
+        return BannerDismissalResult(accepted_selector=selector)
+    return BannerDismissalResult()
 
 
 async def _goto_with_retries(page, url: str, timeout_ms: int) -> None:
@@ -1451,7 +1725,8 @@ async def _goto_with_retries(page, url: str, timeout_ms: int) -> None:
             await asyncio.sleep(backoffs[attempt - 1])
     # All three attempts failed.
     logger.error("goto failed after 3 attempts: %s", last_exc)
-    assert last_exc is not None  # for type-checkers
+    if last_exc is None:  # Defensive invariant; do not rely on assert under -O.
+        raise RuntimeError("goto retries exhausted without a captured exception")
     raise last_exc
 
 
@@ -1579,8 +1854,9 @@ async def _capture_one(
 
         # Cookie/GDPR banner dismissal: try a closed list of common accept
         # selectors with a 500ms per-selector timeout. Click the first match.
+        banner_dismissal = BannerDismissalResult()
         if cfg.dismiss_banners:
-            await _dismiss_common_banners(page)
+            banner_dismissal = await _dismiss_common_banners(page)
 
         for step in state_spec.get("setup_steps", []):
             await _apply_setup_step(context, page, step)
@@ -1596,6 +1872,12 @@ async def _capture_one(
         dom = await asyncio.wait_for(page.evaluate(INSTRUMENT_JS), timeout=60.0)
         screenshot_options, screenshot_coverage = _screenshot_options(cfg, preset, dom)
         await page.screenshot(path=str(screen_path), **screenshot_options)
+        try:
+            await _enrich_accessibility_names(page, dom)
+        except Exception as e:
+            # Browser accessibility enrichment improves semantic accuracy but
+            # must not turn a successful visual capture into a failed run.
+            logger.warning("browser accessibility-name enrichment missed: %s", e)
         # Redact tokens/fragments from the URL we persist.
         observed_url = dom.get("url")
         if isinstance(observed_url, str):
@@ -1627,6 +1909,10 @@ async def _capture_one(
             "truncated": bool(dom.get("truncated", False)),
             "coverage": combined_coverage,
             "websockets_blocked": True,
+            "banner_dismissal": {
+                "requested": cfg.dismiss_banners,
+                **banner_dismissal.to_dict(),
+            },
         }
         dom_path.write_text(json.dumps(dom, indent=2), encoding="utf-8")
 

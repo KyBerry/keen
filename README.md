@@ -4,7 +4,7 @@
 
 <h1 align="center">Keen</h1>
 
-<p align="center"><strong>A keen eye for UI systems.</strong></p>
+<p align="center"><strong>A second set of eyes for better web design.</strong></p>
 
 <p align="center">
   <a href="https://github.com/KyBerry/keen/actions/workflows/ci.yml"><img src="https://github.com/KyBerry/keen/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -12,39 +12,57 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-035CFE" alt="MIT license"></a>
 </p>
 
-Keen is a local-first UI/UX review toolkit for Claude Code, Codex, and the
-command line. It captures the rendered interface, measures what can be measured,
-and gives the model structured evidence for the work that still requires
-judgment.
+Keen helps coding agents make websites that feel thoughtful, polished, and
+consistent—not generic.
 
-The split is deliberate: Python handles geometry, contrast, DOM state, token
-math, and repeatable predicates. The agent handles intent, hierarchy,
-prioritization, and design-system decisions.
+It can help when you are starting from nothing, working through a half-built
+product, improving a finished page, or checking new work against an established
+design.
 
-## What Keen does
+## What Keen helps with
 
-| Need | Keen workflow |
-| --- | --- |
-| Review a rendered product | Capture responsive states, grade measurable issues, and prioritize corrections |
-| Find AI-default UI patterns | Measure repeated visual tells and propose specific escape moves |
-| Compare a named system | Check against Material 3, Apple HIG, Fluent 2, Polaris, Carbon, or Atlassian |
-| Understand the visual language | Extract tokens and characterize density, type, color, shape, and depth |
-| Build a system from evidence | Turn a captured product, seed color, or measured inspiration into a validated proposal |
+- **Find a direction** — see a few strong options and choose what fits.
+- **Make it clear** — turn that choice into guidance the whole project can use.
+- **Improve the real page** — catch weak hierarchy, awkward spacing, generic
+  patterns, and details that feel unfinished.
+- **Keep it consistent** — check new work against the decisions you already
+  made.
 
-Every run writes inspectable artifacts under `.keen/`. Screenshots, extracted
-DOM evidence, JSON, Markdown, and HTML stay available for review instead of
-being hidden inside a model response.
+Keen looks at the actual product, not a made-up demo. It reads the code and
+content, works within the project's constraints, and checks its work in the
+browser.
 
-<details>
-  <summary><strong>See an example system review</strong></summary>
-  <br>
-  <img src="plugins/keen/assets/review-preview.png" width="900" alt="Example Keen design-system review">
-</details>
+## Try asking
+
+> Help me find the right look and feel for this site.
+
+> Make this page feel polished and less generic.
+
+> We are halfway through this product. Clean up the inconsistencies and make
+> the design easier to continue.
+
+> Check that this change still fits the rest of the product.
+
+You can speak to Keen naturally. Focused workflows are also available as
+`/keen:explore`, `/keen:establish`, `/keen:refine`, and `/keen:guard` in Claude
+Code, or with `$keen:` in Codex.
+
+## See choices before committing
+
+When the look and feel is still unclear, Keen can open a small local workshop
+with two or three directions made for your product. Each option shows what it
+would feel like, why it might work, and where it could go wrong.
+
+Pick one, combine ideas, or reject the set. Keen then builds the smallest useful
+version, checks it in the browser, and only keeps decisions that still feel right
+after seeing the result.
+
+The workshop stays on your computer and loads no remote images.
 
 ## Install
 
-Keen has two parts: a host plugin with model workflows and a Python CLI with the
-measurement runtime. Install both.
+Keen includes a plugin for the coding agent and a local command-line tool for
+browser checks.
 
 ```bash
 git clone https://github.com/KyBerry/keen.git
@@ -61,8 +79,6 @@ uv tool run --from "$PWD/plugins/keen" playwright install chromium
 keen doctor
 ```
 
-Start a new Claude Code session after installation so skill discovery reloads.
-
 ### Codex
 
 ```bash
@@ -73,76 +89,68 @@ uv tool run --from "$PWD/plugins/keen" playwright install chromium
 keen doctor
 ```
 
-Start a new Codex task after installation so the new plugin is available to the
-model.
+Start a new Claude Code session or Codex task after installation.
 
-## Use it
+## What Keen remembers
 
-Ask naturally:
+Keen can save the design decisions that should survive the current chat:
 
-> Review this rendered dashboard and prioritize the three highest-leverage fixes.
+```text
+.keen/
+├── design-context.json   project design memory for coding agents
+└── direction.md          the same direction in a readable document
+```
 
-Or invoke a focused workflow such as `/keen:ui-deslop` in Claude Code or
-`$keen:ui-deslop` in Codex.
+Commit these two files when you want every developer and agent to work from the
+same direction. Temporary screenshots and reports can stay untracked.
 
-The CLI is useful in scripts and for inspecting intermediate artifacts:
+```gitignore
+.keen/*
+!.keen/design-context.json
+!.keen/direction.md
+```
+
+<details>
+  <summary><strong>Browser reviews and reports</strong></summary>
+
+Keen can review a running page at mobile and desktop sizes:
 
 ```bash
-keen review "https://app.example.com/dashboard" --against material-3
+keen review "http://localhost:3000" --viewports mobile,desktop
+```
+
+The review includes a readable HTML report, screenshots, and structured
+evidence for the agent. Measurements help the model investigate; they are not
+presented as a score for whether a design is beautiful.
+
+<br>
+<img src="plugins/keen/assets/review-preview.png" width="900" alt="Example Keen website review">
+</details>
+
+<details>
+  <summary><strong>More commands</strong></summary>
+
+```bash
+keen doctor
 keen capture "http://localhost:3000" --viewports mobile,desktop
 keen audit ".keen/review/<run>"
 keen tokens ".keen/review/<run>"
-keen slop ".keen/review/<run>" --print-markdown
-keen taste ".keen/review/<run>"
-keen diff ".keen/review/<old>" ".keen/review/<new>"
+keen diff ".keen/review/<baseline>" ".keen/review/<current>"
 ```
+</details>
 
-Run `keen <command> --help` for the authoritative options.
+## Safety
 
-## Workflows
+- A review does not give Keen permission to edit the product.
+- Keen only builds or fixes something when you ask it to.
+- Local project artifacts stay inside the project.
+- The local tool has no telemetry or model SDK.
 
-- `ui-review` — complete evidence-based review
-- `ui-capture` — screenshots and DOM evidence without critique
-- `ui-audit` — reanalyze an existing run
-- `ui-compare` — compare with one named design system
-- `ui-tokens` — extract observed design tokens
-- `ui-deslop` — isolate recognizable AI-default patterns
-- `ui-taste` — describe the measurable visual signature
-- `ui-intent` — reconcile the screen with the user's likely job
-- `ui-systemize` — reduce observed evidence into a system proposal
-- `ui-create` — create and validate a new system
-- `ui-remix` — transform measured inspiration into a distinct direction
+See the [security policy](SECURITY.md) for private vulnerability reporting and
+guidance on protecting local review data.
 
-## Safety model
-
-Keen is conservative around rendered products and credentials:
-
-- localhost and remote targets are treated as untrusted input;
-- declarative `--auth-steps` is preferred over executable auth scripts;
-- internal-network and `file:` access require explicit flags;
-- plugins do not install Python packages or browsers as a side effect;
-- review workflows write evidence but do not silently edit product source;
-- only creation workflows may produce design-system proposals.
-
-See [declarative authentication](plugins/keen/docs/auth-steps.md) for the full
-credential-handling contract.
-
-## Repository layout
-
-```text
-.agents/plugins/marketplace.json   Codex marketplace
-.claude-plugin/marketplace.json    Claude Code marketplace
-codex-plugins/keen/                generated, allowlisted Codex bundle
-plugins/keen/                      canonical plugin and Python package
-```
-
-Do not edit `codex-plugins/keen/` directly. Build it from the canonical source:
-
-```bash
-python plugins/keen/scripts/sync_codex_plugin_bundle.py
-```
-
-## Develop
+<details>
+  <summary><strong>Development</strong></summary>
 
 ```bash
 cd plugins/keen
@@ -152,11 +160,15 @@ uv run pytest -q
 uv run ruff check harness tests scripts
 uv run mypy harness
 uv run python scripts/validate_prompts.py
+uv run python scripts/evaluate_skill_contracts.py
+uv run python scripts/evaluate_direction_workshop.py --platform static
 uv run python scripts/smoke_wheel.py
 ```
 
-Keen currently has 974 passing tests, deterministic activation-contract checks,
-strict plugin validation, and isolated wheel-install coverage.
+The canonical plugin lives in `plugins/keen/`. Generate the Codex bundle with
+`python plugins/keen/scripts/sync_codex_plugin_bundle.py`; do not edit
+`codex-plugins/keen/` directly.
+</details>
 
 ## License
 
