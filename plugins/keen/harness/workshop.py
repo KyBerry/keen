@@ -20,6 +20,7 @@ from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -48,6 +49,18 @@ _MAX_BODY_BYTES = 96 * 1024
 
 class WorkshopError(ValueError):
     """Raised for invalid workshop artifacts or unsafe output targets."""
+
+
+class _LoopbackHTTPServer(ThreadingHTTPServer):
+    """Bind a literal loopback address without HTTPServer's reverse DNS lookup."""
+
+    def server_bind(self) -> None:
+        # HTTPServer.server_bind() calls socket.getfqdn(), which can stall on
+        # macOS runners and is unnecessary for a literal loopback-only server.
+        TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
 
 
 def _is_string(value: Any, *, maximum: int, allow_empty: bool = False) -> bool:
@@ -859,7 +872,7 @@ def serve(
         response_path=destination,
         submitted=submitted,
     )
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    server = _LoopbackHTTPServer(("127.0.0.1", port), handler)
     server.daemon_threads = True
     server.timeout = 0.25
     actual_port = int(server.server_address[1])

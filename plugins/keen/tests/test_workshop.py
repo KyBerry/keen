@@ -138,7 +138,9 @@ def test_promotion_rejects_unknown_context_keys() -> None:
     assert any("unknown keys" in error for error in validate_promotion(promotion))
 
 
-def test_loopback_server_requires_token_and_writes_valid_response(tmp_path: Path) -> None:
+def test_loopback_server_requires_token_and_writes_valid_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     ready = tmp_path / "ready.json"
     response_path = tmp_path / "response.json"
     errors: list[BaseException] = []
@@ -148,6 +150,11 @@ def test_loopback_server_requires_token_and_writes_valid_response(tmp_path: Path
     def mark_ready(url: str) -> None:
         ready_url.append(url)
         ready_signal.set()
+
+    def reject_reverse_dns(_host: str) -> str:
+        raise AssertionError("loopback workshop must not perform reverse DNS")
+
+    monkeypatch.setattr("http.server.socket.getfqdn", reject_reverse_dns)
 
     def run() -> None:
         try:
@@ -165,6 +172,7 @@ def test_loopback_server_requires_token_and_writes_valid_response(tmp_path: Path
     thread = threading.Thread(target=run)
     thread.start()
     assert ready_signal.wait(timeout=10)
+    monkeypatch.undo()
     assert ready.exists()
     url = ready_url[0]
     assert json.loads(ready.read_text(encoding="utf-8"))["url"] == url
