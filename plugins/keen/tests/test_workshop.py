@@ -4,7 +4,6 @@ import json
 import os
 import stat
 import threading
-import time
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -143,6 +142,12 @@ def test_loopback_server_requires_token_and_writes_valid_response(tmp_path: Path
     ready = tmp_path / "ready.json"
     response_path = tmp_path / "response.json"
     errors: list[BaseException] = []
+    ready_url: list[str] = []
+    ready_signal = threading.Event()
+
+    def mark_ready(url: str) -> None:
+        ready_url.append(url)
+        ready_signal.set()
 
     def run() -> None:
         try:
@@ -152,18 +157,17 @@ def test_loopback_server_requires_token_and_writes_valid_response(tmp_path: Path
                 timeout_seconds=5,
                 open_browser=False,
                 ready_path=ready,
+                on_ready=mark_ready,
             )
         except BaseException as exc:  # pragma: no cover - asserted after join
             errors.append(exc)
 
     thread = threading.Thread(target=run)
     thread.start()
-    for _ in range(100):
-        if ready.exists():
-            break
-        time.sleep(0.02)
+    assert ready_signal.wait(timeout=10)
     assert ready.exists()
-    url = json.loads(ready.read_text(encoding="utf-8"))["url"]
+    url = ready_url[0]
+    assert json.loads(ready.read_text(encoding="utf-8"))["url"] == url
     origin, query = url.split("/?", 1)
     token = query.removeprefix("token=")
 
