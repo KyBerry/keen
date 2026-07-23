@@ -1,7 +1,7 @@
 {
   "name": "keen",
-  "version": "0.7.0+codex.20260722060451",
-  "description": "Sharp-eyed UI/UX review and design-system workflows for Codex. Requires the separately installed local Keen CLI and Playwright Chromium runtime.",
+  "version": "0.8.0+codex.20260723015218",
+  "description": "Design guidance and visual review for websites built with coding agents. Requires the local Keen CLI and Playwright Chromium runtime.",
   "author": {
     "name": "Kyle Berry",
     "email": "kylestephberry@gmail.com"
@@ -13,15 +13,15 @@
     "design",
     "accessibility",
     "design-system",
-    "critique",
-    "ai-slop",
+    "moodboard",
+    "creative-direction",
     "playwright"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Keen",
-    "shortDescription": "Spot UI issues and shape stronger systems",
-    "longDescription": "Give rendered interfaces a keen eye: measure design and accessibility signals, compare named systems, characterize AI-default patterns and visual taste, and turn evidence into validated design-system proposals. The plugin supplies model workflows; the local Keen CLI and Playwright Chromium runtime are installed separately.",
+    "shortDescription": "Make websites feel thoughtful, polished, and consistent",
+    "longDescription": "Keen helps you choose a visual direction, improve real pages, and keep the product consistent. It spots generic or unfinished details and suggests better options.",
     "developerName": "Kyle Berry",
     "category": "Developer Tools",
     "capabilities": [
@@ -30,9 +30,9 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Review this interface and prioritize the top three fixes.",
-      "Find the strongest AI-default patterns in this UI.",
-      "Turn this captured run into a coherent design system."
+      "Help me find the right look and feel for this site.",
+      "Make this page feel polished and less generic.",
+      "Check that this change still fits the rest of the product."
     ],
     "brandColor": "#035CFE",
     "composerIcon": "./assets/keen-logo.png",

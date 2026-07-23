@@ -1,7 +1,0 @@
-interface:
-  display_name: "UI De-slop"
-  short_description: "Find measurable AI-default UI patterns"
-  brand_color: "#035CFE"
-  default_prompt: "Use $ui-deslop to find the strongest AI-default UI patterns and page-specific escape moves."
-policy:
-  allow_implicit_invocation: false

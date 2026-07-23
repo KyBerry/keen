@@ -1,7 +1,0 @@
-interface:
-  display_name: "UI Review"
-  short_description: "Review rendered UI with measured evidence"
-  brand_color: "#035CFE"
-  default_prompt: "Use $ui-review to review this rendered interface and prioritize the three highest-leverage corrections."
-policy:
-  allow_implicit_invocation: false

@@ -1,7 +1,7 @@
 interface:
   display_name: "Keen"
-  short_description: "Review and systemize rendered UI evidence"
+  short_description: "Design, improve, and keep your site consistent"
   brand_color: "#035CFE"
-  default_prompt: "Use $keen to choose and run the smallest evidence-based UI workflow for this request."
+  default_prompt: "Use $keen to decide what design help this product needs and carry it through."
 policy:
   allow_implicit_invocation: true

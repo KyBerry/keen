@@ -1,0 +1,7 @@
+interface:
+  display_name: "Establish"
+  short_description: "Make the chosen direction easy to follow"
+  brand_color: "#035CFE"
+  default_prompt: "Use $establish to make this product's design direction clear and reusable."
+policy:
+  allow_implicit_invocation: false

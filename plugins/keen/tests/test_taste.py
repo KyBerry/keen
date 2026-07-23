@@ -118,9 +118,7 @@ def test_render_taste_card_contains_dimensions(tmp_path: Path) -> None:
         "## Shape & depth",
         "## Spacing & density",
         "Archetype hint:",
-        "Distinctiveness:",
-        "Boldness:",
-        "Polish:",
+        "Heuristic signals (not quality ratings):",
     ):
         assert marker in card, f"missing {marker!r}"
 

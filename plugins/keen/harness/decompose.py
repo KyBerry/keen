@@ -65,7 +65,7 @@ INPUT_TYPE_ROLES: dict[str, str] = {
     "tel": "textbox",
     "url": "textbox",
     "number": "spinbutton",
-    "password": "textbox",
+    "password": "textbox",  # pragma: allowlist secret  # nosec B105
     "text": "textbox",
     "date": "textbox",
     "color": "textbox",
@@ -87,6 +87,11 @@ class Component:
     box: dict[str, int]
     styles: dict[str, str]
 
+    name_source: str = "dom-heuristic"
+    has_visible_text: bool = False
+    text_style_divergent: bool = False
+    is_inline_text_link: bool = False
+    has_horizontal_overflow_ancestor: bool = False
     disabled: bool = False
     aria_hidden: bool = False
     aria_disabled: bool = False
@@ -108,6 +113,8 @@ class Component:
     capture_path: str = ""
     device_pixel_ratio: float = 1.0
     viewport_width: int = 0
+    capture_width: int = 0
+    capture_height: int = 0
     document_background: str = "rgb(255, 255, 255)"
     is_focused: bool = False
 
@@ -255,6 +262,15 @@ def decompose(dom_path: Path) -> list[Component]:
     vw = int(viewport_size.get("width") or data.get("viewport", {}).get("width") or 0)
     document_background = str(data.get("documentBackgroundColor") or "rgb(255, 255, 255)")
     focused_index = data.get("focused_index", -1)
+    screenshot_coverage = (data.get("coverage") or {}).get("screenshot") or {}
+    captured_size = screenshot_coverage.get("captured_css_px") or {}
+    capture_width = int(captured_size.get("width") or vw)
+    capture_height = int(
+        captured_size.get("height")
+        or (data.get("documentSize") or {}).get("height")
+        or viewport_size.get("height")
+        or 0
+    )
     raw_elements = data.get("elements", [])
     elements_by_index = {
         elem["index"]: elem
@@ -278,6 +294,18 @@ def decompose(dom_path: Path) -> list[Component]:
         elem["name"] = safe_name
         elem["text"] = safe_text
 
+        captured_visible_text = elem.get("hasVisibleText")
+        if isinstance(captured_visible_text, bool):
+            has_visible_text = captured_visible_text
+        else:
+            # Legacy capture fallback. Name is a reasonable proxy for most
+            # text-bearing controls, but never treat image alternatives as
+            # rendered text when deciding whether text-only predicates apply.
+            has_visible_text = bool(
+                safe_text
+                or (safe_name and str(elem.get("tag") or "").lower() not in {"img", "svg"})
+            )
+
         role = _resolve_role(elem, elements_by_index)
         kind = _classify(elem, role)
         if kind is None:
@@ -293,6 +321,13 @@ def decompose(dom_path: Path) -> list[Component]:
                 text=safe_text,
                 box=elem["box"],
                 styles=elem.get("styles", {}),
+                name_source=str(elem.get("nameSource") or "dom-heuristic"),
+                has_visible_text=has_visible_text,
+                text_style_divergent=bool(elem.get("textStyleDivergent", False)),
+                is_inline_text_link=bool(elem.get("isInlineTextLink", False)),
+                has_horizontal_overflow_ancestor=bool(
+                    elem.get("hasHorizontalOverflowAncestor", False)
+                ),
                 disabled=elem.get("disabled", False),
                 aria_hidden=elem.get("ariaHidden", False),
                 aria_disabled=elem.get("ariaDisabled", False),
@@ -312,6 +347,8 @@ def decompose(dom_path: Path) -> list[Component]:
                 capture_path=capture_path,
                 device_pixel_ratio=dpr,
                 viewport_width=vw,
+                capture_width=capture_width,
+                capture_height=capture_height,
                 document_background=document_background,
                 is_focused=(elem["index"] == focused_index),
             )

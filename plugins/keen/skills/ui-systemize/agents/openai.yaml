@@ -1,7 +1,0 @@
-interface:
-  display_name: "UI Systemize"
-  short_description: "Turn captured evidence into a design system"
-  brand_color: "#035CFE"
-  default_prompt: "Use $ui-systemize to turn this Keen run into a validated design-system proposal."
-policy:
-  allow_implicit_invocation: false

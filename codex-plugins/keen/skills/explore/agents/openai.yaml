@@ -1,0 +1,7 @@
+interface:
+  display_name: "Explore"
+  short_description: "Find a look and feel that fits the product"
+  brand_color: "#035CFE"
+  default_prompt: "Use $explore to help me find a strong visual direction for this product."
+policy:
+  allow_implicit_invocation: false

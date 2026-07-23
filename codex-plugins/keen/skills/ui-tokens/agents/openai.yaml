@@ -1,7 +1,0 @@
-interface:
-  display_name: "UI Tokens"
-  short_description: "Extract observed UI design tokens"
-  brand_color: "#035CFE"
-  default_prompt: "Use $ui-tokens to extract and summarize the observed design tokens from this run or screenshot."
-policy:
-  allow_implicit_invocation: false

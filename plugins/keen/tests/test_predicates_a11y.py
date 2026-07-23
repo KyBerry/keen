@@ -294,71 +294,50 @@ def test_invalid_tabindex_does_not_crash() -> None:
 # --- target.size-aa (WCAG 2.5.8 AA) ---------------------------------------
 
 
-def test_target_size_aa_fires_on_20x20_with_no_system() -> None:
-    """A 20x20 button fails AA (24x24)."""
+def test_target_size_aa_allows_isolated_20x20_via_spacing_exception() -> None:
+    """An isolated 20x20 target passes WCAG 2.5.8's spacing exception."""
     comps = [_comp(box={"x": 0, "y": 0, "w": 20, "h": 20})]
     found = _findings(comps)
     assert "hit-target.size" not in found
+    assert "target.size-aa" not in found
+
+
+def test_target_size_aa_fires_when_undersized_target_spacing_circles_overlap() -> None:
+    comps = [
+        _comp(index=0, box={"x": 0, "y": 0, "w": 20, "h": 20}),
+        _comp(index=1, box={"x": 22, "y": 0, "w": 20, "h": 20}),
+    ]
+
+    found = _findings(comps)
+
     assert "target.size-aa" in found
-
-
-def test_target_size_aa_fires_when_system_threshold_lowered_via_filter() -> None:
-    """30x30 button: passes default 44px system threshold? No, fails. Use a fluent system.
-
-    fluent-2 sets hit_target_min_px=32 — so 30x30 still fails hit-target.size.
-    To test target.size-aa in isolation we need a system whose threshold is
-    BELOW 24, or we need a target whose dimensions fall in the 24<=x<system
-    range. Use a 24x24 box with no system override — it passes hit-target
-    (>= default 44? no, 24 < 44) so hit-target fires. Need to find the gap.
-
-    Actual workaround: use carbon (40) and a 30x30 input — both fire. Use
-    a 26x26 input with fluent-2 (32) and the system rule still fires.
-
-    Direct way: 24x24 button with viewport_width such that hit-target.size
-    is the one to suppress AA. Better: stub it so only target.size-aa fires
-    by setting tab_index>0 and box=20x20 — but that still triggers hit-
-    target. The only realistic isolation is *removing* the existing
-    finding from the comp first. Instead, just verify the rule fires when
-    we run a tight box smaller than 24 directly through the predicate.
-    """
-    from harness.analyze import _target_size_aa
-
-    comp = _comp(
-        component_kind="button",
-        box={"x": 0, "y": 0, "w": 20, "h": 20},
-        findings=[],  # no prior findings
-    )
-    # No prior hit-target finding: target.size-aa should fire.
-    finding = _target_size_aa(comp, {"thresholds": {}})
-    assert finding is not None
-    assert finding.predicate_id == "target.size-aa"
-    assert finding.severity == "P1"
 
 
 def test_target_size_aa_passes_on_24x24() -> None:
     """24x24 is the exact AA minimum."""
-    from harness.analyze import _target_size_aa
-
-    comp = _comp(
-        component_kind="button",
-        box={"x": 0, "y": 0, "w": 24, "h": 24},
-        findings=[],
-    )
-    assert _target_size_aa(comp, {"thresholds": {}}) is None
+    comps = [
+        _comp(index=0, box={"x": 0, "y": 0, "w": 24, "h": 24}),
+        _comp(index=1, box={"x": 1, "y": 1, "w": 24, "h": 24}),
+    ]
+    assert "target.size-aa" not in _findings(comps)
 
 
 def test_target_size_aa_inline_link_exception() -> None:
     """An inline link whose height < 24 but width is fine is exempt."""
-    from harness.analyze import _target_size_aa
-
-    comp = _comp(
-        component_kind="link",
-        role="link",
-        tag="a",
-        box={"x": 0, "y": 0, "w": 80, "h": 20},
-        findings=[],
-    )
-    assert _target_size_aa(comp, {"thresholds": {}}) is None
+    comps = [
+        _comp(
+            index=0,
+            component_kind="link",
+            role="link",
+            tag="a",
+            box={"x": 0, "y": 0, "w": 80, "h": 20},
+            is_inline_text_link=True,
+        ),
+        _comp(index=1, box={"x": 2, "y": 0, "w": 20, "h": 20}),
+    ]
+    _findings(comps)
+    link_findings = {finding["predicate_id"] for finding in comps[0].get("findings", [])}
+    assert "target.size-aa" not in link_findings
 
 
 # --- dialog.focus-trap-affordance (WAI ARIA APG) -------------------------

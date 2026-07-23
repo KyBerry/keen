@@ -1,0 +1,7 @@
+interface:
+  display_name: "Guard"
+  short_description: "Catch changes that make the product feel inconsistent"
+  brand_color: "#035CFE"
+  default_prompt: "Use $guard to check whether this change still fits the product and catch regressions."
+policy:
+  allow_implicit_invocation: false

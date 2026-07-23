@@ -28,6 +28,47 @@ def test_encode_image_rejects_file_over_size_cap(tmp_path: Path, monkeypatch) ->
     assert html_report._encode_image(image) is None
 
 
+def test_component_evidence_is_bounded_and_keeps_top_finding_targets(
+    tmp_path: Path,
+) -> None:
+    components = [
+        {
+            "index": index,
+            "component_kind": "button",
+            "viewport": "desktop",
+            "state": "default",
+            "capture_path": "screens/desktop-default.png",
+            "box": {"x": 0, "y": index * 50, "w": 100, "h": 40},
+            "findings": [
+                {
+                    "severity": "P2",
+                    "predicate_id": f"predicate-{index % 5}",
+                    "message": f"finding {index}",
+                }
+            ],
+        }
+        for index in range(40)
+    ]
+    top = [
+        {
+            "capture_path": "screens/desktop-default.png",
+            "component_index": 39,
+        }
+    ]
+
+    rendered = html_report._render_components(
+        components,
+        top,
+        tmp_path,
+        link_images=True,
+    )
+
+    assert rendered.count('class="component-card"') <= 24
+    assert 'id="component-desktop-default-39"' in rendered
+    assert "representative components from 40 flagged" in rendered
+    assert "report.json" in rendered
+
+
 def test_md_to_html_headings_and_paragraphs() -> None:
     src = "# Title\n\nHello world.\n\n## Sub\n\nAnother para."
     out = md_to_html(src)
@@ -182,7 +223,7 @@ def _minimal_report(*, with_findings: bool = True) -> dict[str, Any]:
             },
         ]
     return {
-        "version": "0.7.0",
+        "version": "0.8.0",
         "target_system": "material-3",
         "captures": [
             {
@@ -417,15 +458,16 @@ def test_write_report_link_images_mode_uses_relative_paths(tmp_path: Path) -> No
     assert "screens/desktop-default.png" in text
 
 
-def test_render_report_includes_grade_and_damage(tmp_path: Path) -> None:
+def test_render_report_includes_signal_band_and_weighted_index(tmp_path: Path) -> None:
     rep = _minimal_report()
     html = render_report(rep, captures_dir=tmp_path, summary_md="")
-    # Grade card.
+    assert "Signal band" in html
+    assert "Weighted index" in html
     assert ">C<" in html  # grade letter inline
     assert "20.5" in html  # damage value
 
 
-def test_render_report_uses_document_title_and_condensed_verdict(tmp_path: Path) -> None:
+def test_render_report_uses_document_title_and_contextual_signal_summary(tmp_path: Path) -> None:
     rep = _minimal_report()
     html = render_report(
         rep,
@@ -434,8 +476,9 @@ def test_render_report_uses_document_title_and_condensed_verdict(tmp_path: Path)
     )
 
     assert "<h1>Example</h1>" in html
-    assert "Functional but rough." in html
-    assert "P0 blockers" in html
+    assert "deterministic candidate signals" in html
+    assert "P0 candidates" in html
+    assert "Functional but rough." not in html
     assert "Repeated details." not in html
 
 
@@ -530,4 +573,4 @@ def test_compose_writes_report_html(tmp_path: Path) -> None:
         'id="tokens"',
     ):
         assert marker in text, f"missing {marker}"
-    assert rep["version"] == "0.7.0"
+    assert rep["version"] == "0.8.0"

@@ -21,7 +21,9 @@ import pytest
 
 from harness.capture import (
     COMMON_BANNER_DISMISS,
+    COMMON_BANNER_FOLLOWUP_DISMISS,
     INSTRUMENT_JS,
+    BannerDismissalResult,
     CaptureConfig,
     _dismiss_common_banners,
 )
@@ -65,10 +67,15 @@ def test_banner_dismiss_list_contains_accept_all_aria() -> None:
     assert any("Accept all" in s for s in COMMON_BANNER_DISMISS)
 
 
+def test_banner_dismiss_list_contains_govuk_cookie_action() -> None:
+    assert any("govuk-cookie-banner" in s for s in COMMON_BANNER_DISMISS)
+    assert any("Hide cookie message" in s for s in COMMON_BANNER_FOLLOWUP_DISMISS)
+
+
 def test_banner_dismiss_list_no_injection_chars() -> None:
     """Selectors are static literals — defense against future contributors
     adding attacker-controlled fragments by mistake."""
-    for s in COMMON_BANNER_DISMISS:
+    for s in [*COMMON_BANNER_DISMISS, *COMMON_BANNER_FOLLOWUP_DISMISS]:
         assert "`" not in s
         assert "${" not in s
         assert "\x00" not in s
@@ -82,8 +89,10 @@ def test_dismiss_common_banners_returns_first_match() -> None:
     page = AsyncMock()
     page.click = AsyncMock(return_value=None)  # resolves immediately
     result = asyncio.run(_dismiss_common_banners(page))
-    assert result == COMMON_BANNER_DISMISS[0]
-    page.click.assert_called_once()
+    assert result == BannerDismissalResult(
+        COMMON_BANNER_DISMISS[0], COMMON_BANNER_FOLLOWUP_DISMISS[0]
+    )
+    assert page.click.call_count == 2
 
 
 def test_dismiss_common_banners_returns_none_when_no_match() -> None:
@@ -91,7 +100,7 @@ def test_dismiss_common_banners_returns_none_when_no_match() -> None:
     page = AsyncMock()
     page.click = AsyncMock(side_effect=Exception("not found"))
     result = asyncio.run(_dismiss_common_banners(page))
-    assert result is None
+    assert result == BannerDismissalResult()
     # Should try every selector in the list.
     assert page.click.call_count == len(COMMON_BANNER_DISMISS)
 
@@ -101,8 +110,10 @@ def test_dismiss_common_banners_returns_middle_match() -> None:
     page = AsyncMock()
     page.click = AsyncMock(side_effect=[Exception("no"), Exception("no"), None, None])
     result = asyncio.run(_dismiss_common_banners(page))
-    assert result == COMMON_BANNER_DISMISS[2]
-    assert page.click.call_count == 3
+    assert result == BannerDismissalResult(
+        COMMON_BANNER_DISMISS[2], COMMON_BANNER_FOLLOWUP_DISMISS[0]
+    )
+    assert page.click.call_count == 4
 
 
 def test_dismiss_common_banners_passes_timeout_to_click() -> None:
@@ -111,7 +122,7 @@ def test_dismiss_common_banners_passes_timeout_to_click() -> None:
     page = AsyncMock()
     page.click = AsyncMock(return_value=None)
     asyncio.run(_dismiss_common_banners(page))
-    _, kwargs = page.click.call_args
+    _, kwargs = page.click.call_args_list[0]
     assert kwargs.get("timeout") == 500
 
 
@@ -165,7 +176,9 @@ def test_all_exposed_symbols_present() -> None:
     """The new public-ish names should be importable for downstream callers."""
     from harness.capture import (  # noqa: F401
         COMMON_BANNER_DISMISS,
+        COMMON_BANNER_FOLLOWUP_DISMISS,
         INSTRUMENT_JS,
+        BannerDismissalResult,
         CaptureConfig,
         _dismiss_common_banners,
     )

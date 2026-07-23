@@ -14,11 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from harness import __version__, _html_report
+from harness import design_context as context_mod
 from harness import rubric as rubric_mod
 from harness._sanitize import (
     sanitize_capture_meta,
     sanitize_component,
     sanitize_finding,
+    sanitize_untrusted_text,
 )
 
 logger = logging.getLogger("keen.report")
@@ -95,13 +97,114 @@ def _crop_components(captures_dir: Path, components: list[dict]) -> None:
             continue
 
 
-def _annotate_overviews(captures_dir: Path, components: list[dict]) -> dict[str, str]:
-    """Draw boxes on each unique full-page screenshot for components with findings.
+def _select_annotations(
+    components: list[dict],
+    top_findings: list[dict],
+    *,
+    per_capture_limit: int = 8,
+    per_predicate_limit: int = 2,
+) -> dict[str, list[dict[str, Any]]]:
+    """Build a bounded evidence index from the report's prioritized findings.
+
+    Only P0/P1 findings that resolve to an exact captured component are
+    eligible. Multiple findings on the same component share one marker, and a
+    noisy predicate may contribute at most two markers per screen. The
+    resulting structure is used by both the PNG renderer and report.html so a
+    marker always has a matching, readable explanation.
+    """
+    components_by_key = {
+        (str(component.get("capture_path") or ""), component.get("index")): component
+        for component in components
+        if component.get("capture_path") and component.get("index") is not None
+    }
+    selected_by_key: dict[tuple[str, Any], dict[str, Any]] = {}
+    by_capture: dict[str, list[dict[str, Any]]] = {}
+    predicate_counts: dict[tuple[str, str], int] = {}
+    capture_counts: dict[str, int] = {}
+    next_marker = 1
+
+    for rank, finding in enumerate(top_findings, start=1):
+        finding_id = f"finding-{rank:02d}"
+        finding["finding_id"] = finding_id
+        severity = str(finding.get("severity") or "P2")
+        if severity not in {"P0", "P1"}:
+            continue
+        capture_path = str(finding.get("capture_path") or "")
+        component_index = finding.get("component_index")
+        key = (capture_path, component_index)
+        component = components_by_key.get(key)
+        if component is None:
+            continue
+        box = component.get("box") or {}
+        viewport_width = float(
+            component.get("capture_width") or component.get("viewport_width") or 0
+        )
+        capture_height = float(component.get("capture_height") or 0)
+        left = float(box.get("x") or 0)
+        right = left + float(box.get("w") or 0)
+        top = float(box.get("y") or 0)
+        bottom = top + float(box.get("h") or 0)
+        if (
+            right <= 0
+            or bottom <= 0
+            or (viewport_width > 0 and left >= viewport_width)
+            or (capture_height > 0 and top >= capture_height)
+        ):
+            # A map marker must point to pixels the screenshot actually shows.
+            # Keep the finding in the table, but do not create an orphan label
+            # for wholly off-screen geometry.
+            continue
+        predicate_id = str(finding.get("predicate_id") or "finding")
+        marker = selected_by_key.get(key)
+        if marker is None:
+            predicate_key = (capture_path, predicate_id)
+            if capture_counts.get(capture_path, 0) >= per_capture_limit:
+                continue
+            if predicate_counts.get(predicate_key, 0) >= per_predicate_limit:
+                continue
+            annotation_id = f"A{next_marker:02d}"
+            next_marker += 1
+            marker = {
+                "id": annotation_id,
+                "severity": severity,
+                "predicate_ids": [],
+                "finding_ids": [],
+                "message": str(finding.get("message") or ""),
+                "component_kind": str(component.get("component_kind") or "component"),
+                "component_index": component_index,
+                "viewport": str(component.get("viewport") or ""),
+                "state": str(component.get("state") or ""),
+                "capture_path": capture_path,
+                "crop_path": component.get("crop_path"),
+                "box": dict(component.get("box") or {}),
+                "device_pixel_ratio": float(component.get("device_pixel_ratio") or 1.0),
+            }
+            selected_by_key[key] = marker
+            stem = Path(capture_path).stem
+            by_capture.setdefault(stem, []).append(marker)
+            capture_counts[capture_path] = capture_counts.get(capture_path, 0) + 1
+            predicate_counts[predicate_key] = predicate_counts.get(predicate_key, 0) + 1
+        elif severity == "P0":
+            marker["severity"] = "P0"
+
+        if predicate_id not in marker["predicate_ids"]:
+            marker["predicate_ids"].append(predicate_id)
+        marker["finding_ids"].append(finding_id)
+        finding["annotation_id"] = marker["id"]
+
+    return by_capture
+
+
+def _annotate_overviews(
+    captures_dir: Path,
+    annotations: dict[str, list[dict[str, Any]]],
+) -> dict[str, str]:
+    """Render self-explaining evidence maps for prioritized components.
 
     Returns a dict mapping viewport-state -> relative annotated path.
     """
     try:
-        from PIL import Image, ImageDraw, UnidentifiedImageError
+        from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
     except ImportError:
         return {}
 
@@ -109,15 +212,13 @@ def _annotate_overviews(captures_dir: Path, components: list[dict]) -> dict[str,
     out_dir.mkdir(parents=True, exist_ok=True)
     captures_root = captures_dir.resolve()
 
-    by_capture: dict[str, list[dict]] = {}
-    for c in components:
-        rel = c.get("capture_path")
-        if not rel or not c.get("findings"):
-            continue
-        by_capture.setdefault(rel, []).append(c)
-
     annotated_paths: dict[str, str] = {}
-    for rel, comps in by_capture.items():
+    for stem, markers in annotations.items():
+        if not markers:
+            continue
+        rel = str(markers[0].get("capture_path") or "")
+        if not rel:
+            continue
         src = (captures_dir / rel).resolve()
         try:
             src.relative_to(captures_root)
@@ -128,7 +229,7 @@ def _annotate_overviews(captures_dir: Path, components: list[dict]) -> dict[str,
             continue
         try:
             with Image.open(src) as im:
-                img = im.convert("RGB").copy()
+                screenshot = im.convert("RGB").copy()
         except (OSError, UnidentifiedImageError):
             logger.warning(
                 "failed to load screenshot for annotation: %s",
@@ -136,25 +237,140 @@ def _annotate_overviews(captures_dir: Path, components: list[dict]) -> dict[str,
                 exc_info=True,
             )
             continue
+
+        scale = max(float(markers[0].get("device_pixel_ratio") or 1.0), 1.0)
+        title_size = max(16, int(17 * scale))
+        body_size = max(13, int(13 * scale))
+        try:
+            title_font = ImageFont.load_default(size=title_size)
+            body_font = ImageFont.load_default(size=body_size)
+        except TypeError:  # Pillow < 10 compatibility for downstream users.
+            title_font = ImageFont.load_default()
+            body_font = ImageFont.load_default()
+        top_pad = max(14, int(14 * scale))
+        title_height = max(24, int(28 * scale))
+        row_height = max(28, int(30 * scale))
+        header_height = top_pad * 2 + title_height + row_height * len(markers)
+        img = Image.new(
+            "RGB", (screenshot.width, screenshot.height + header_height), (248, 246, 240)
+        )
+        img.paste(screenshot, (0, header_height))
         draw = ImageDraw.Draw(img)
-        for c in comps:
-            scale = float(c.get("device_pixel_ratio") or 1.0)
-            b = c["box"]
-            x0 = int(b["x"] * scale)
-            y0 = int(b["y"] * scale)
-            x1 = int((b["x"] + b["w"]) * scale)
-            y1 = int((b["y"] + b["h"]) * scale)
-            severities = [f["severity"] for f in c.get("findings", [])]
-            worst = "P0" if "P0" in severities else ("P1" if "P1" in severities else "P2")
-            color = SEVERITY_COLORS.get(worst, SEVERITY_COLORS["P2"])
-            for off in range(3):
-                draw.rectangle([x0 - off, y0 - off, x1 + off, y1 + off], outline=color)
+        ink = (31, 31, 28)
+        muted = (96, 91, 82)
+        rule = (208, 202, 190)
+        draw.text(
+            (top_pad, top_pad),
+            f"Keen evidence map - {len(markers)} prioritized area{'s' if len(markers) != 1 else ''}",
+            fill=ink,
+            font=title_font,
+        )
+
+        def fit_text(
+            value: str,
+            max_width: int,
+            *,
+            _draw: Any = draw,
+            _font: Any = body_font,
+        ) -> str:
+            if _draw.textlength(value, font=_font) <= max_width:
+                return value
+            suffix = "…"
+            lo, hi = 0, len(value)
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if _draw.textlength(value[:mid] + suffix, font=_font) <= max_width:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            return value[:lo].rstrip() + suffix
+
+        for row, marker in enumerate(markers):
+            row_y = top_pad + title_height + row * row_height
+            severity = str(marker.get("severity") or "P1")
+            color = SEVERITY_COLORS.get(severity, SEVERITY_COLORS["P2"])
+            marker_text = str(marker["id"])
+            marker_w = max(
+                int(44 * scale), int(draw.textlength(marker_text, font=body_font) + 18 * scale)
+            )
+            marker_h = max(int(21 * scale), body_size + int(8 * scale))
+            draw.rounded_rectangle(
+                [top_pad, row_y, top_pad + marker_w, row_y + marker_h],
+                radius=max(2, int(3 * scale)),
+                fill=color,
+            )
+            marker_ink = (255, 255, 255) if severity == "P0" else (31, 31, 28)
+            draw.text(
+                (top_pad + int(8 * scale), row_y + int(3 * scale)),
+                marker_text,
+                fill=marker_ink,
+                font=body_font,
+            )
+            predicates = ", ".join(str(item) for item in marker.get("predicate_ids") or [])
+            label = f"{severity} - {predicates} - {marker.get('message') or ''}"
+            label = (
+                label.replace("≥", ">=")
+                .replace("≤", "<=")
+                .replace("\u00d7", "x")
+                .encode("ascii", errors="replace")
+                .decode("ascii")
+            )
+            text_x = top_pad + marker_w + int(12 * scale)
+            draw.text(
+                (text_x, row_y + int(3 * scale)),
+                fit_text(label, screenshot.width - text_x - top_pad),
+                fill=muted,
+                font=body_font,
+            )
+            draw.line(
+                [
+                    (top_pad, row_y + marker_h + int(4 * scale)),
+                    (screenshot.width - top_pad, row_y + marker_h + int(4 * scale)),
+                ],
+                fill=rule,
+                width=max(1, int(scale)),
+            )
+
+        for marker in markers:
+            scale = float(marker.get("device_pixel_ratio") or 1.0)
+            box = marker.get("box") or {}
+            x0 = int(float(box.get("x", 0)) * scale)
+            y0 = int(float(box.get("y", 0)) * scale) + header_height
+            x1 = int((float(box.get("x", 0)) + float(box.get("w", 0))) * scale)
+            y1 = int((float(box.get("y", 0)) + float(box.get("h", 0))) * scale) + header_height
+            severity = str(marker.get("severity") or "P1")
+            color = SEVERITY_COLORS.get(severity, SEVERITY_COLORS["P2"])
+            line_width = max(2, int(2 * scale))
+            for offset in range(line_width):
+                draw.rectangle(
+                    [x0 - offset, y0 - offset, x1 + offset, y1 + offset],
+                    outline=color,
+                )
+            marker_text = str(marker["id"])
+            marker_w = max(
+                int(44 * scale), int(draw.textlength(marker_text, font=body_font) + 18 * scale)
+            )
+            marker_h = max(int(21 * scale), body_size + int(8 * scale))
+            pill_x = min(max(0, x0), max(0, screenshot.width - marker_w))
+            pill_y = max(header_height, y0 - marker_h)
+            draw.rounded_rectangle(
+                [pill_x, pill_y, pill_x + marker_w, pill_y + marker_h],
+                radius=max(2, int(3 * scale)),
+                fill=color,
+            )
+            marker_ink = (255, 255, 255) if severity == "P0" else (31, 31, 28)
+            draw.text(
+                (pill_x + int(8 * scale), pill_y + int(3 * scale)),
+                marker_text,
+                fill=marker_ink,
+                font=body_font,
+            )
         # Output path
         out_name = Path(rel).stem + "-annotated.png"
         out_path = out_dir / out_name
         try:
             img.save(out_path)
-            annotated_paths[Path(rel).stem] = str(out_path.relative_to(captures_dir))
+            annotated_paths[stem] = str(out_path.relative_to(captures_dir))
         except (OSError, ValueError):
             logger.warning(
                 "failed to save annotated overview %s",
@@ -211,6 +427,13 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
                     "document_size": dom.get("documentSize"),
                     "manual_review_needed": meta.get("manual_review_needed", False),
                     "focus_coverage": dom.get("focus_coverage", {}),
+                    "banner_dismissal": meta.get("banner_dismissal")
+                    or {
+                        "requested": False,
+                        "dismissed": False,
+                        "accepted_selector": None,
+                        "followup_selector": None,
+                    },
                     "coverage": meta.get("coverage")
                     or dom.get("coverage")
                     or {
@@ -225,8 +448,6 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
 
     flagged = [c for c in components if c.get("findings")]
     _crop_components(captures_dir, flagged)
-    annotated = _annotate_overviews(captures_dir, flagged)
-
     cfg = rubric_mod.load_config()
     analysis = {"components": components, "global_findings": global_findings}
     scoring = rubric_mod.score(analysis, config=cfg)
@@ -235,6 +456,8 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
     # Sanitize once more here so the report's most-prominent surface is safe.
     for f in top:
         sanitize_finding(f)
+    annotations = _select_annotations(components, top)
+    annotated = _annotate_overviews(captures_dir, annotations)
 
     tokens_path = captures_dir / "tokens" / "extracted.json"
     if not tokens_path.exists():
@@ -315,12 +538,26 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
     grade = scoring.get("grade")
     damage = scoring.get("score")
 
+    project_context: dict[str, Any] | None = None
+    project_context_path = context_mod.find_context(captures_dir)
+    if project_context_path is not None:
+        try:
+            payload, loaded_path = context_mod.load_context(project_context_path)
+            project_context = context_mod.compact_context(payload, path=loaded_path)
+        except ValueError as exc:
+            project_context = {
+                "artifact": str(project_context_path),
+                "valid": False,
+                "errors": [sanitize_untrusted_text(str(exc), max_len=500)],
+            }
+
     result = {
         "version": __version__,
         "target_system": target_system,
         "coverage": coverage,
         "captures": captures_meta,
         "annotated_overviews": annotated,
+        "annotations": annotations,
         "grade": grade,
         "damage": damage,
         "score": scoring,
@@ -328,6 +565,7 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
         "global_findings": global_findings,
         "tokens": tokens,
         "components": components,
+        "design_context": project_context,
     }
 
     # Emit a compact, agent-first index. The full report remains available for
@@ -352,6 +590,11 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
 def build_agent_brief(report: dict[str, Any]) -> dict[str, Any]:
     """Build the bounded artifact agents should read before the full report."""
     score = report.get("score") or {}
+    component_lookup = {
+        (str(component.get("capture_path") or ""), component.get("index")): component
+        for component in report.get("components", [])
+        if isinstance(component, dict)
+    }
     captures = []
     for capture in report.get("captures", []):
         captures.append(
@@ -360,8 +603,12 @@ def build_agent_brief(report: dict[str, Any]) -> dict[str, Any]:
                 for key in (
                     "viewport",
                     "state",
+                    "url",
+                    "title",
                     "screen_path",
+                    "document_size",
                     "manual_review_needed",
+                    "banner_dismissal",
                     "coverage",
                 )
             }
@@ -372,12 +619,18 @@ def build_agent_brief(report: dict[str, Any]) -> dict[str, Any]:
         "severity",
         "predicate_id",
         "component_id",
+        "component_index",
         "component_kind",
         "message",
         "rule",
+        "measured",
+        "expected",
         "crop_path",
         "finding_id",
+        "annotation_id",
+        "capture_path",
         "box",
+        "visible_in_capture",
     )
     for finding in report.get("top_findings", []):
         key = (
@@ -403,6 +656,28 @@ def build_agent_brief(report: dict[str, Any]) -> dict[str, Any]:
         item = {
             field: finding.get(field) for field in finding_fields if finding.get(field) is not None
         }
+        component = component_lookup.get(
+            (str(finding.get("capture_path") or ""), finding.get("component_index"))
+        )
+        if component is not None:
+            element = {
+                key: component.get(key)
+                for key in (
+                    "index",
+                    "tag",
+                    "role",
+                    "name",
+                    "name_source",
+                    "text",
+                    "href",
+                    "box",
+                    "crop_path",
+                )
+                if component.get(key) is not None
+            }
+            if element:
+                item["element"] = element
+        item["judgment_required"] = True
         item["occurrences"] = 1
         item["responsive_scopes"] = [scope]
         grouped_by_key[key] = item
@@ -411,6 +686,7 @@ def build_agent_brief(report: dict[str, Any]) -> dict[str, Any]:
     return {
         "version": report.get("version"),
         "target_system": report.get("target_system"),
+        "design_context": report.get("design_context"),
         "coverage": report.get("coverage"),
         "grade": score.get("grade"),
         "damage": score.get("score"),
@@ -419,8 +695,27 @@ def build_agent_brief(report: dict[str, Any]) -> dict[str, Any]:
         "by_component_kind": score.get("by_component_kind", {}),
         "captures": captures,
         "annotated_overviews": report.get("annotated_overviews", {}),
+        "annotations": report.get("annotations", {}),
         "top_findings": grouped_findings,
         "token_diagnostics": (report.get("tokens") or {}).get("diagnostics", {}),
+        "automated_signal_summary": {
+            "band": score.get("grade"),
+            "weighted_index": score.get("score"),
+            "counts": score.get("counts", {}),
+            "meaning": (
+                "Deterministic candidate-signal density, not an overall visual-quality verdict."
+            ),
+        },
+        "decision_contract": {
+            "code_provides": "rendered facts, candidate rules, coverage, and stable evidence",
+            "model_decides": "product relevance, user impact, final priority, and design direction",
+            "requirements": [
+                "Use the project design context when present.",
+                "Cite finding IDs or named elements for consequential judgments.",
+                "Treat automated severity and scores as risk hints, not final verdicts.",
+                "State uncertainty or missing product intent instead of inventing it.",
+            ],
+        },
         "artifacts": {
             "summary": "summary.md",
             "full_report": "report.json",
@@ -435,15 +730,14 @@ def render_summary(report: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append("# Keen review")
     lines.append("")
-    lines.append("## Verdict")
+    lines.append("## Automated signal summary")
     lines.append("")
     sc = report.get("score", {})
     grade = sc.get("grade", "?")
-    grade_summary = sc.get("grade_summary", "")
-    lines.append(f"**Grade:** {grade} — {grade_summary}")
+    lines.append(f"**Signal band:** {grade}")
     damage = sc.get("score")
     damage_display = "not scored" if damage is None else str(damage)
-    lines.append(f"**Damage score:** {damage_display} (lower is better)")
+    lines.append(f"**Weighted candidate index:** {damage_display} (lower is better)")
     counts = sc.get("counts", {})
     lines.append(
         f"**Findings:** P0={counts.get('P0', 0)}  "
@@ -452,12 +746,17 @@ def render_summary(report: dict[str, Any]) -> str:
     if report.get("target_system"):
         lines.append(f"**Target system:** {report['target_system']}")
     lines.append("")
+    lines.append(
+        "> These are deterministic candidate signals, not an overall verdict on beauty, "
+        "product quality, or release readiness. The model must judge relevance and priority."
+    )
+    lines.append("")
 
     coverage = report.get("coverage") or {}
     if coverage.get("provisional"):
         lines.append(
             "> **Partial audit:** capture coverage is incomplete. "
-            "The grade is provisional; resolve capture limits or failures before shipping."
+            "The signal summary is provisional; resolve capture limits before deciding."
         )
         lines.append("")
 
@@ -477,7 +776,7 @@ def render_summary(report: dict[str, Any]) -> str:
             lines.append(f"- `{path}`")
     lines.append("")
 
-    lines.append("## Top findings")
+    lines.append("## Candidate findings")
     lines.append("")
     top_findings = report.get("top_findings", [])
     for f in top_findings:

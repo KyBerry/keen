@@ -80,6 +80,40 @@ def test_parser_recognizes_subcommands() -> None:
     assert args.run_a == "/tmp/a"
 
 
+def test_context_lifecycle_commands_round_trip(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    project = tmp_path / "northstar"
+    project.mkdir()
+    assert cli.main(["context", "init", str(project), "--name", "Northstar"]) == 0
+    context = project / ".keen" / "design-context.json"
+    direction = project / ".keen" / "direction.md"
+    assert context.exists()
+    assert direction.exists()
+
+    assert cli.main(["context", "validate", str(project)]) == 0
+    assert "[PASS]" in capsys.readouterr().out
+    assert cli.main(["context", "show", str(project)]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["project"]["name"] == "Northstar"
+
+    payload = json.loads(context.read_text())
+    payload["direction"]["qualities"] = ["precise", "warm"]
+    context.write_text(json.dumps(payload))
+    assert cli.main(["context", "render", str(project)]) == 0
+    assert "precise" in direction.read_text()
+
+
+def test_context_init_refuses_to_overwrite_without_force(tmp_path: Path) -> None:
+    assert cli.main(["context", "init", str(tmp_path), "--name", "One"]) == 0
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["context", "init", str(tmp_path), "--name", "Two"])
+    assert exc.value.code == 2
+    assert cli.main(["context", "init", str(tmp_path), "--name", "Two", "--force"]) == 0
+    payload = json.loads((tmp_path / ".keen" / "design-context.json").read_text())
+    assert payload["project"]["name"] == "Two"
+
+
 # --- cmd_diff end-to-end -------------------------------------------------
 
 

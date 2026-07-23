@@ -1,0 +1,7 @@
+interface:
+  display_name: "Refine"
+  short_description: "Improve a page until it feels finished"
+  brand_color: "#035CFE"
+  default_prompt: "Use $refine to make this page feel polished, specific, and finished."
+policy:
+  allow_implicit_invocation: false

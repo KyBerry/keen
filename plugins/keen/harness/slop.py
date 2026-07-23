@@ -326,7 +326,7 @@ class SlopReport:
     # Per-fingerprint hit count, useful for telemetry without the full payload.
     hit_counts: dict[str, int] = field(default_factory=dict)
     # The escape moves, deduplicated and ordered by impact, for the agent
-    # to surface as "next 3 things to fix" in a /keen:ui-deslop critique.
+    # to surface as candidate evidence in a contextual Refine critique.
     top_escapes: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -1428,14 +1428,18 @@ def analyze_slop(captures_dir: Path) -> SlopReport:
 def render_markdown(report: SlopReport) -> str:
     """Human-readable summary of a SlopReport.
 
-    Designed to be loaded directly by the agent as the body of a
-    `/keen:ui-deslop`
-    critique — already cites evidence, already ranks escapes.
+    Designed to be loaded as optional evidence inside a contextual Refine
+    critique — it cites measured signals and ranks possible escape moves.
     """
     lines: list[str] = []
-    lines.append("# Keen — slop report")
+    lines.append("# AI-default candidate signals")
     lines.append("")
-    lines.append(f"**Slop score:** {report.score} / 100  →  *{report.band}*")
+    lines.append(f"**Candidate index:** {report.score} / 100  →  *{report.band}*")
+    lines.append("")
+    lines.append(
+        "> This is structural pattern evidence, not a verdict that the product is generic. "
+        "Judge each signal against the product's intent and recorded direction."
+    )
     lines.append("")
     if report.score < 15:
         lines.append("The design has its own voice. No defaults stacked, no template tells.")

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "arms": ["brief-only", "static-questionnaire", "adaptive-workshop", "rendered-loop"],
+  "cases": [
+    {
+      "id": "relay-incident-handoff",
+      "brief": "Relay helps an interrupted on-call engineer understand a live incident and take ownership. It is an existing compact React desktop app. The receiving engineer may be tired and scanning under time pressure. The main action is accepting ownership. Use real incident language and support 200% zoom.",
+      "static_questionnaire": "Tone: calm and trustworthy. Style: clean. Favorite color: blue. Density: comfortable.",
+      "adaptive_workshop": "The user chose Command brief: one editorial incident sentence leads, operational facts stay above the fold, and severity supports rather than flooding the surface. For transfer they chose Continuous relay: ownership changes immediately, the previous owner remains visible for ten minutes, and the next verification becomes the primary follow-up. They warned that editorial type must not make routine warnings theatrical.",
+      "rendered_evidence": "The 390px render wrapped the serif incident sentence to four lines and pushed ownership below the fold. At 1440px the facts remained visible and the command hierarchy read correctly. Revision: use the dramatic display scale only from 720px, use a balanced two-line size on mobile, and place current owner immediately before the action at every width. The revised mobile and desktop captures both kept owner, action, and next check visible.",
+      "fresh_task": "Plan the production implementation of Relay's live incident handoff header and completed ownership state.",
+      "expected_terms": ["ownership", "incident", "next check", "mobile", "operational facts"],
+      "forbidden_terms": ["gradient", "glassmorphism", "dashboard cards", "make it pop"]
+    },
+    {
+      "id": "ledger-client-approval",
+      "brief": "Ledger is a mid-build web app where independent architects send a project decision packet to a client. The client must understand one consequential choice, compare two material options, and approve or request a revision. Most clients open the link on a phone. The codebase already has project photography, an accessible dialog primitive, and a neutral stone palette.",
+      "static_questionnaire": "Tone: premium and minimal. Style: modern editorial. Favorite color: beige. Corners: slightly rounded.",
+      "adaptive_workshop": "The user chose Evidence folio over Luxury gallery. The decision statement and consequences lead; project photography is supporting evidence rather than a full-bleed hero. They want a serif display role only for the decision sentence, sans serif for comparison and controls, and one unambiguous Approve option action. They rejected ornamental project-status chips and asked to keep revision equally legible.",
+      "rendered_evidence": "The first phone prototype made Approve visually dominant enough that Request a revision looked disabled. A second render gave both outcomes equal text contrast while retaining one filled action only after the client selects an option. The 360px comparison became a vertical evidence sequence; the 1280px version preserved side-by-side material samples. Both states used real project copy.",
+      "fresh_task": "Plan the production implementation of Ledger's client decision route, including option comparison and both completion outcomes.",
+      "expected_terms": ["decision", "approve", "revision", "phone", "project photography"],
+      "forbidden_terms": ["gradient", "glassmorphism", "bento", "premium feel"]
+    }
+  ]
+}

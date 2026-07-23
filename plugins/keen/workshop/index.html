@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Keen direction workshop</title>
+    <link rel="stylesheet" href="/assets/workshop.css">
+    <script src="/assets/workshop.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#decision">Skip to the decision</a>
+    <header class="masthead">
+      <div class="wordmark" aria-label="Keen">
+        <span class="wordmark-mark" aria-hidden="true"></span>
+        <span>Keen</span>
+      </div>
+      <p class="session-label" id="session-label">Direction workshop</p>
+      <p class="privacy-note">Local session · no external assets</p>
+    </header>
+
+    <main class="workspace">
+      <aside class="brief" aria-labelledby="brief-title">
+        <p class="section-index">Project truth</p>
+        <h1 id="brief-title">Loading workshop…</h1>
+        <dl class="brief-facts" id="brief-facts"></dl>
+        <div class="constraints" id="constraints" hidden>
+          <h2>Constraints in force</h2>
+          <ul id="constraint-list"></ul>
+        </div>
+        <p class="brief-note">
+          Choose what best supports the product—not what looks fashionable in isolation.
+        </p>
+      </aside>
+
+      <section class="decision" id="decision" aria-labelledby="workshop-title">
+        <div class="stage-heading">
+          <div>
+            <p class="eyebrow" id="eyebrow"></p>
+            <h2 id="workshop-title"></h2>
+          </div>
+          <p class="progress" id="progress" aria-live="polite"></p>
+        </div>
+        <p class="intro" id="intro"></p>
+
+        <form id="workshop-form" novalidate>
+          <div id="question-region"></div>
+          <p class="form-error" id="form-error" role="alert" hidden></p>
+          <div class="form-actions">
+            <button class="button button-secondary" id="back-button" type="button">Back</button>
+            <button class="button button-primary" id="next-button" type="button">Continue</button>
+          </div>
+        </form>
+
+        <section class="completion" id="completion" tabindex="-1" hidden>
+          <p class="section-index">Round complete</p>
+          <h2>Your choices are ready for critique.</h2>
+          <p>
+            Keen will use this response as evidence, make the smallest useful prototype,
+            and return with the rendered result or the next unresolved decision.
+          </p>
+          <p class="completion-note">You can close this tab.</p>
+        </section>
+      </section>
+    </main>
+
+    <noscript>This workshop requires JavaScript to render the agent-authored decision spec.</noscript>
+  </body>
+</html>

@@ -502,6 +502,38 @@ def test_top_findings_respects_limit() -> None:
     assert len(out) == 5
 
 
+def test_top_findings_prioritizes_visible_evidence_within_severity() -> None:
+    analysis = {
+        "components": [
+            {
+                "component_kind": "heading-2",
+                "index": 1,
+                "box": {"x": 10, "y": 1200, "w": 300, "h": 40},
+                "capture_width": 1440,
+                "capture_height": 900,
+                "findings": [{"severity": "P0", "predicate_id": "a-offscreen"}],
+            },
+            {
+                "component_kind": "link",
+                "index": 2,
+                "box": {"x": 10, "y": 100, "w": 120, "h": 30},
+                "capture_width": 1440,
+                "capture_height": 900,
+                "findings": [{"severity": "P0", "predicate_id": "z-visible"}],
+            },
+        ]
+    }
+
+    out = top_findings(analysis, limit=2)
+
+    assert [finding["predicate_id"] for finding in out] == [
+        "z-visible",
+        "a-offscreen",
+    ]
+    assert out[0]["visible_in_capture"] is True
+    assert out[1]["visible_in_capture"] is False
+
+
 def test_top_findings_diversifies_with_per_predicate_cap() -> None:
     analysis = {
         "components": [

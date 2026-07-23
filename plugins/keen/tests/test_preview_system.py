@@ -325,7 +325,7 @@ def test_cli_preview_system_missing_file_exits_2(tmp_path: Path):
 def test_e2e_pipeline_derive_validate_preview(tmp_path: Path):
     """End-to-end: derive a palette, hand-write a system, validate, preview.
 
-    Exercises the same CLI calls the ``/ui-create`` slash command makes,
+    Exercises the same CLI calls the Establish workflow makes,
     in the same order, against a hand-built system JSON. The slash command
     itself is invoked by Claude (not pytest), so this test verifies only
     the deterministic CLI pipeline behind it.

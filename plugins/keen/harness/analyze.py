@@ -19,9 +19,9 @@ sampling predicates; without it those checks no-op.
 
 from __future__ import annotations
 
-import heapq
 import json
 import logging
+import math
 import re
 from collections import defaultdict
 from collections.abc import Callable
@@ -204,17 +204,18 @@ def _hit_target_size(comp: dict, ctx: dict) -> Finding | None:
     minimum = ctx["thresholds"]["hit_target_min_px"]
     if box["w"] >= minimum and box["h"] >= minimum:
         return None
-    # Inline links inside a paragraph are exempt from the touch-target rule
-    # (WCAG 2.2 carves them out explicitly).
-    if comp["component_kind"] == "link" and box["h"] < minimum and box["w"] >= minimum:
+    # Named-system dimensions are a conformance preference, not a WCAG
+    # failure. Inline links are not useful targets for this comparison.
+    if comp.get("is_inline_text_link"):
         return None
     return Finding(
         predicate_id="hit-target.size",
-        severity="P1",
-        rule=f"{target_system} interactive target ≥{minimum}×{minimum}px",
+        severity="P2",
+        rule=f"{target_system} target-size preference: ≥{minimum}×{minimum}px",
         message=(
             f"{comp['component_kind']} measures {box['w']}×{box['h']}px; "
-            f"{target_system} requires ≥{minimum}×{minimum}px."
+            f"this differs from the {target_system} ≥{minimum}×{minimum}px pattern. "
+            "Treat this as system drift, not an accessibility failure."
         ),
         measured={"width": box["w"], "height": box["h"]},
         expected={"width": minimum, "height": minimum},
@@ -244,6 +245,18 @@ def _hit_target_size(comp: dict, ctx: dict) -> Finding | None:
     },
 )
 def _contrast_text(comp: dict, ctx: dict) -> Finding | None:
+    has_visible_text = comp.get("has_visible_text")
+    if has_visible_text is None:
+        has_visible_text = bool((comp.get("text") or comp.get("name") or "").strip())
+    if not has_visible_text:
+        # Image-only and icon-only controls need non-text contrast checks, not
+        # text contrast computed from an inherited CSS color they never draw.
+        return None
+    if comp.get("text_style_divergent"):
+        # A parent with differently styled descendant runs cannot be graded
+        # using the parent's single computed color. Treat it as inconclusive
+        # instead of inventing a blocking contrast result.
+        return None
     fg = comp.get("styles", {}).get("color", "")
     bg = _resolve_background(comp, ctx)
     ratio = contrast_ratio(fg, bg)
@@ -486,9 +499,12 @@ def _multiple_h1(components: list[dict], ctx: dict) -> list[Finding]:
     for c in h1s[1:]:
         f = Finding(
             predicate_id="heading.duplicate-h1",
-            severity="P1",
-            rule="Page should have a single h1",
-            message=f"Multiple h1 elements detected ({len(h1s)} total).",
+            severity="P2",
+            rule="Review pages with multiple h1 elements for a clear document title",
+            message=(
+                f"Multiple h1 elements detected ({len(h1s)} total). HTML permits this, "
+                "so verify the document outline manually rather than treating it as a WCAG failure."
+            ),
             measured={"count": len(h1s)},
         )
         c.setdefault("findings", []).append(f.to_dict())
@@ -501,21 +517,24 @@ def _multiple_h1(components: list[dict], ctx: dict) -> list[Finding]:
 
 @predicate("link.distinguishable", {"link"})
 def _link_distinguishable(comp: dict, ctx: dict) -> Finding | None:
+    if not comp.get("is_inline_text_link"):
+        return None
     s = comp.get("styles", {})
     if s.get("textDecorationLine", "none") not in ("none", ""):
         return None
-    fg = s.get("color", "")
-    bg = _resolve_background(comp, ctx)
-    ratio = contrast_ratio(fg, bg)
-    if ratio is None or ratio >= 3.0:
-        return Finding(
-            predicate_id="link.distinguishable",
-            severity="P1",
-            rule="Links in body text need a non-color distinguisher (WCAG SC 1.4.1)",
-            message="Link has no underline; verify it's distinguishable from surrounding text by more than color alone.",
-            measured={"textDecorationLine": s.get("textDecorationLine", "none")},
-        )
-    return None
+    return Finding(
+        predicate_id="link.distinguishable",
+        severity="P2",
+        rule="Verify inline links do not rely on color alone (WCAG 2.2 SC 1.4.1)",
+        message=(
+            "Inline link has no persistent underline. Automated evidence does not establish "
+            "its contrast against surrounding text or hover/focus cue; verify those states manually."
+        ),
+        measured={
+            "textDecorationLine": s.get("textDecorationLine", "none"),
+            "evidence_complete": False,
+        },
+    )
 
 
 # -- Predicates: spacing rhythm -------------------------------------------
@@ -562,6 +581,11 @@ def _spacing_on_grid(comp: dict, ctx: dict) -> Finding | None:
 
 @predicate("layout.off-canvas", set())  # registered manually to apply to all
 def _off_canvas(comp: dict, ctx: dict) -> Finding | None:
+    if comp.get("has_horizontal_overflow_ancestor"):
+        # A carousel, tab strip, or intentionally clipped rail does not make
+        # the document itself horizontally scroll. Its own interaction and
+        # affordance require separate rendered review.
+        return None
     vw = comp.get("viewport_width") or 0
     if vw <= 0:
         return None
@@ -598,104 +622,136 @@ _OFF_CANVAS_KINDS = INTERACTIVE_KINDS | {
 
 @global_predicate
 def _tap_target_overlap(components: list[dict], ctx: dict) -> list[Finding]:
-    """Flag interactive elements whose hit areas come too close to each other."""
-    pad = ctx["thresholds"]["tap_overlap_pad_px"]
+    """Apply the WCAG 2.5.8 spacing exception to undersized targets.
+
+    Targets that contain a 24x24 CSS pixel square pass without any spacing
+    requirement. For each remaining target, WCAG centers a 24px-diameter
+    circle on its bounding box; that circle must not intersect another target
+    or the equivalent circle for another undersized target. Inline text links
+    are explicitly exempt.
+    """
+    minimum = 24.0
+    radius = minimum / 2.0
     interactives = [c for c in components if c.get("component_kind") in INTERACTIVE_KINDS]
+    undersized = [
+        c
+        for c in interactives
+        if not c.get("is_inline_text_link")
+        and (
+            float((c.get("box") or {}).get("w", 0)) < minimum
+            or float((c.get("box") or {}).get("h", 0)) < minimum
+        )
+    ]
     out: list[Finding] = []
-    if len(interactives) < 2:
+    if not undersized or len(interactives) < 2:
         return out
 
-    # Sweep top-to-bottom and spatially bucket the active x intervals. The old
-    # all-pairs loop made a long form or navigation inventory quadratic even
-    # when every control was hundreds of pixels apart. Exact dx/dy checks stay
-    # below, so bucketing changes only the work required, not the predicate.
-    cell_size = max(float(pad), 32.0)
-    ordered = sorted(
-        enumerate(interactives),
-        key=lambda item: (
-            item[1]["box"]["y"],
-            item[1]["box"]["x"],
-            item[0],
-        ),
-    )
-    active: set[int] = set()
-    expiry_heap: list[tuple[float, int]] = []
-    x_buckets: defaultdict[int, set[int]] = defaultdict(set)
-    bucket_ranges: dict[int, range] = {}
-    seen_pairs: set[tuple[int, int]] = set()
-
-    def expanded_x_cells(box: dict) -> range:
-        first = int((box["x"] - pad) // cell_size)
-        last = int((box["x"] + box["w"] + pad) // cell_size)
-        return range(first, last + 1)
-
-    def occupied_x_cells(box: dict) -> range:
-        first = int(box["x"] // cell_size)
-        last = int((box["x"] + box["w"]) // cell_size)
-        return range(first, last + 1)
-
-    for current_pos, current in ordered:
-        current_box = current["box"]
-        current_top = current_box["y"]
-
-        while expiry_heap and expiry_heap[0][0] <= current_top:
-            _, expired_pos = heapq.heappop(expiry_heap)
-            if expired_pos not in active:
-                continue
-            active.remove(expired_pos)
-            for cell in bucket_ranges.pop(expired_pos):
-                x_buckets[cell].discard(expired_pos)
-                if not x_buckets[cell]:
-                    del x_buckets[cell]
-
-        candidate_positions: set[int] = set()
-        for cell in occupied_x_cells(current_box):
-            candidate_positions.update(x_buckets.get(cell, ()))
-
-        for previous_pos in sorted(candidate_positions):
-            first_pos, second_pos = sorted((previous_pos, current_pos))
-            if (first_pos, second_pos) in seen_pairs:
-                continue
-            seen_pairs.add((first_pos, second_pos))
-            a = interactives[first_pos]
-            b = interactives[second_pos]
-            ab = a["box"]
-            bb = b["box"]
-            dx = max(0, max(ab["x"], bb["x"]) - min(ab["x"] + ab["w"], bb["x"] + bb["w"]))
-            dy = max(0, max(ab["y"], bb["y"]) - min(ab["y"] + ab["h"], bb["y"] + bb["h"]))
-            if dx >= pad or dy >= pad:
-                continue
-            if (
-                dx == 0
-                and dy == 0
-                # Likely intentional adjacency (segmented control). Only flag
-                # when both elements are small enough to be ambiguous.
-                and min(ab["w"], ab["h"], bb["w"], bb["h"]) >= 32
-            ):
-                continue
-            f = Finding(
-                predicate_id="tap-target.overlap",
-                severity="P1",
-                rule=f"Adjacent interactive targets should be ≥{pad}px apart",
-                message=(
-                    f"{a['component_kind']} (idx {a['index']}) and "
-                    f"{b['component_kind']} (idx {b['index']}) are within {pad}px "
-                    f"(dx={dx}, dy={dy})."
-                ),
-                measured={"dx": dx, "dy": dy, "pad": pad},
-            )
-            a.setdefault("findings", []).append(f.to_dict())
-            out.append(f)
-
-        cells = expanded_x_cells(current_box)
-        bucket_ranges[current_pos] = cells
-        for cell in cells:
-            x_buckets[cell].add(current_pos)
-        active.add(current_pos)
-        heapq.heappush(
-            expiry_heap,
-            (current_box["y"] + current_box["h"] + pad, current_pos),
+    def center(comp: dict) -> tuple[float, float]:
+        box = comp["box"]
+        return (
+            float(box["x"]) + float(box["w"]) / 2.0,
+            float(box["y"]) + float(box["h"]) / 2.0,
         )
+
+    def is_undersized(comp: dict) -> bool:
+        box = comp["box"]
+        return float(box["w"]) < minimum or float(box["h"]) < minimum
+
+    def circle_intersects_target(target: dict, other: dict) -> tuple[bool, float]:
+        target_x, target_y = center(target)
+        if is_undersized(other) and not other.get("is_inline_text_link"):
+            other_x, other_y = center(other)
+            distance = ((target_x - other_x) ** 2 + (target_y - other_y) ** 2) ** 0.5
+            return distance < minimum, distance
+        box = other["box"]
+        closest_x = min(
+            max(target_x, float(box["x"])),
+            float(box["x"]) + float(box["w"]),
+        )
+        closest_y = min(
+            max(target_y, float(box["y"])),
+            float(box["y"]) + float(box["h"]),
+        )
+        distance = ((target_x - closest_x) ** 2 + (target_y - closest_y) ** 2) ** 0.5
+        return distance < radius, distance
+
+    # Put nearby targets in 24px spatial buckets. A naive all-pairs scan is
+    # quadratic on long pages; this keeps the standards-correct geometry while
+    # making a sparse page effectively linear. Undersized targets are indexed
+    # by center because WCAG compares their 24px circles. Other targets are
+    # indexed by their rendered rectangles because the circle must clear the
+    # target area itself.
+    cell_size = minimum
+    grid: dict[tuple[int, int], list[dict]] = defaultdict(list)
+    oversized_entries: list[dict] = []
+    max_index_cells = 4_096
+
+    def cell(value: float) -> int:
+        return math.floor(value / cell_size)
+
+    for other in interactives:
+        if is_undersized(other) and not other.get("is_inline_text_link"):
+            other_x, other_y = center(other)
+            grid[(cell(other_x), cell(other_y))].append(other)
+            continue
+        box = other["box"]
+        left = cell(float(box["x"]))
+        right = cell(float(box["x"]) + float(box["w"]))
+        top = cell(float(box["y"]))
+        bottom = cell(float(box["y"]) + float(box["h"]))
+        cell_count = (right - left + 1) * (bottom - top + 1)
+        if cell_count > max_index_cells:
+            # A viewport-scale overlay is rare and cheaper to check directly
+            # than to duplicate into thousands of buckets.
+            oversized_entries.append(other)
+            continue
+        for grid_x in range(left, right + 1):
+            for grid_y in range(top, bottom + 1):
+                grid[(grid_x, grid_y)].append(other)
+
+    for target in undersized:
+        nearest: tuple[float, dict] | None = None
+        target_x, target_y = center(target)
+        nearby: dict[int, dict] = {}
+        for grid_x in range(cell(target_x) - 1, cell(target_x) + 2):
+            for grid_y in range(cell(target_y) - 1, cell(target_y) + 2):
+                for candidate in grid.get((grid_x, grid_y), []):
+                    nearby[id(candidate)] = candidate
+        for candidate in oversized_entries:
+            nearby[id(candidate)] = candidate
+
+        for other in nearby.values():
+            if other is target:
+                continue
+            intersects, distance = circle_intersects_target(target, other)
+            if not intersects:
+                continue
+            if nearest is None or distance < nearest[0]:
+                nearest = (distance, other)
+        if nearest is None:
+            continue
+        distance, other = nearest
+        box = target["box"]
+        finding = Finding(
+            predicate_id="target.size-aa",
+            severity="P1",
+            rule="24px target-size or spacing exception (WCAG 2.2 SC 2.5.8 AA)",
+            message=(
+                f"{target['component_kind']} measures {box['w']}×{box['h']}px and its "
+                f"24px spacing circle intersects {other['component_kind']} "
+                f"(idx {other['index']})."
+            ),
+            measured={
+                "width": box["w"],
+                "height": box["h"],
+                "spacing_circle_diameter": int(minimum),
+                "nearest_target_index": other["index"],
+                "nearest_distance": round(distance, 2),
+            },
+            expected={"minimum_square": 24, "or_spacing_circle_clear": True},
+        )
+        target.setdefault("findings", []).append(finding.to_dict())
+        out.append(finding)
     return out
 
 
@@ -979,45 +1035,6 @@ def _focus_positive_tabindex(comp: dict, ctx: dict) -> Finding | None:
             "order, breaks naturally as the page evolves, and confuses assistive tech."
         ),
         measured={"tab_index": ti_int},
-    )
-
-
-# -- Predicates: target size (WCAG 2.5.8 AA, 24x24) -----------------------
-
-
-@predicate("target.size-aa", INTERACTIVE_KINDS)
-def _target_size_aa(comp: dict, ctx: dict) -> Finding | None:
-    """WCAG 2.2 SC 2.5.8 Target Size (Minimum) - Level AA, 24x24 CSS px.
-
-    When a named target system is selected, `hit-target.size` independently
-    enforces that system's preferred minimum. This predicate owns the generic
-    WCAG 2.2 AA floor and also runs when no design system was selected.
-
-    Inline links inside body text are explicitly exempted by the SC.
-    https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html
-    """
-    box = comp.get("box", {})
-    w = box.get("w", 0)
-    h = box.get("h", 0)
-    if w >= 24 and h >= 24:
-        return None
-    # Inline-text-link exception (same carve-out as hit-target.size).
-    if comp.get("component_kind") == "link" and h < 24 and w >= 24:
-        return None
-    # If a named-system rule has already fired, this AA-level check would
-    # duplicate the finding. Skip to keep the report uncluttered.
-    if any(f.get("predicate_id") == "hit-target.size" for f in comp.get("findings", [])):
-        return None
-    return Finding(
-        predicate_id="target.size-aa",
-        severity="P1",
-        rule="Interactive target ≥24×24 CSS px (WCAG 2.2 SC 2.5.8 AA)",
-        message=(
-            f"{comp.get('component_kind')} measures {w}×{h}px; WCAG 2.2 AA requires "
-            "≥24×24px so users with motor impairments can activate it reliably."
-        ),
-        measured={"width": w, "height": h},
-        expected={"width": 24, "height": 24},
     )
 
 

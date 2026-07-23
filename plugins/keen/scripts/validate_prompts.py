@@ -14,22 +14,14 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "skills"
 EXPECTED_SKILLS = {
+    "establish",
+    "explore",
+    "guard",
     "keen",
-    "ui-audit",
-    "ui-capture",
-    "ui-compare",
-    "ui-create",
-    "ui-deslop",
-    "ui-intent",
-    "ui-remix",
-    "ui-review",
-    "ui-systemize",
-    "ui-taste",
-    "ui-tokens",
+    "refine",
 }
-MUTATING_SKILLS = {"ui-create", "ui-remix", "ui-systemize"}
-EXPECTED_REFS = {"characterize.md", "review.md", "screen-intent.md", "system-design.md"}
-VERSION = "0.7.0"
+EXPECTED_REFS = {"design-direction.md", "explore.md", "guard.md", "refine.md", "workshop.md"}
+VERSION = "0.8.0"
 
 
 def words(text: str) -> int:
@@ -113,8 +105,6 @@ def check_skill(path: Path, errors: list[str]) -> tuple[str, int]:
 
     if skill_name != "keen" and "../keen/SKILL.md" not in text:
         errors.append(f"{path}: must link the shared safety contract directly")
-    if skill_name not in MUTATING_SKILLS and re.search(r"(?im)^allowed-tools:.*Write", text):
-        errors.append(f"{path}: read workflow must not preapprove Write")
     return text, count
 
 

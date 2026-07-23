@@ -1,6 +1,8 @@
 """Command-line interface for Keen's deterministic UI review engine.
 
 Subcommands:
+    context    initialize, validate, inspect, or render persistent design direction
+    workshop   run a temporary local direction-decision workshop
     review     capture + decompose + analyze + report (the full pipeline)
     capture    capture only
     audit      analyze captures that already exist on disk
@@ -8,7 +10,7 @@ Subcommands:
     compare    review with a target design system as the rubric
     systemize  propose a design system from observed tokens
     diff       compare findings between two runs
-    intent     emit bounded evidence for /keen:ui-intent
+    intent     emit bounded evidence for the Refine workflow's intent lens
     preview-system  render preview HTML and optional comparison for a system JSON
     doctor     verify install: python version, playwright, configs, references
 
@@ -36,10 +38,12 @@ from harness import (
 from harness import analyze as analyze_mod
 from harness import capture as capture_mod
 from harness import decompose as decompose_mod
+from harness import design_context as context_mod
 from harness import report as report_mod
 from harness import slop as slop_mod
 from harness import taste as taste_mod
 from harness import tokens as tokens_mod
+from harness import workshop as workshop_mod
 from harness._assets import asset_path
 from harness._timing import stage
 from harness._urlsafe import redact_url
@@ -532,13 +536,12 @@ def cmd_review(args: argparse.Namespace) -> int:
         (outdir / "report.json").write_text(json.dumps(rep, indent=2), encoding="utf-8")
         (outdir / "summary.md").write_text(report_mod.render_summary(rep), encoding="utf-8")
 
-    logger.info("slop: scoring")
-    with stage("slop"):
-        _write_slop(outdir)
-
-    logger.info("taste: extracting DNA")
-    with stage("taste"):
-        _write_taste(outdir)
+    if getattr(args, "characterize", False):
+        logger.info("characterization: measuring AI-default and visual-language signals")
+        with stage("slop"):
+            _write_slop(outdir)
+        with stage("taste"):
+            _write_taste(outdir)
 
     logger.info("done. output: %s", outdir)
     logger.info(
@@ -582,10 +585,11 @@ def cmd_audit(args: argparse.Namespace) -> int:
         rep = report_mod.compose(captures_dir, target_system=target_system)
         (captures_dir / "report.json").write_text(json.dumps(rep, indent=2), encoding="utf-8")
         (captures_dir / "summary.md").write_text(report_mod.render_summary(rep), encoding="utf-8")
-    with stage("slop"):
-        _write_slop(captures_dir)
-    with stage("taste"):
-        _write_taste(captures_dir)
+    if getattr(args, "characterize", False):
+        with stage("slop"):
+            _write_slop(captures_dir)
+        with stage("taste"):
+            _write_taste(captures_dir)
     logger.info("audit written to %s", captures_dir)
     logger.info(
         "  grade=%s, damage=%s",
@@ -631,6 +635,158 @@ def cmd_compare(args: argparse.Namespace) -> int:
         logger.error("--against <system> is required for compare")
         raise SystemExit(2)
     return cmd_review(args)
+
+
+def cmd_context_init(args: argparse.Namespace) -> int:
+    """Create the project-owned design memory without overwriting by default."""
+    path = context_mod.context_path(args.target)
+    if path.is_symlink():
+        logger.error("refusing symlink design context: %s", path)
+        raise SystemExit(2)
+    if path.exists() and not args.force:
+        logger.error("design context already exists: %s (pass --force to replace it)", path)
+        raise SystemExit(2)
+    name = args.name or Path(args.target).expanduser().resolve().name or "Project"
+    try:
+        payload = context_mod.new_context(name, stage=args.stage)
+    except ValueError as exc:
+        logger.error("context init: %s", exc)
+        raise SystemExit(2) from exc
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    direction_path = path.parent / context_mod.DIRECTION_FILENAME
+    direction_path.write_text(context_mod.render_direction(payload), encoding="utf-8")
+    logger.info("design context written to %s", path)
+    logger.info("human direction written to %s", direction_path)
+    return 0
+
+
+def cmd_context_validate(args: argparse.Namespace) -> int:
+    path = context_mod.context_path(args.target)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error("context validate: cannot read %s: %s", path, exc)
+        return 2
+    errors = context_mod.validate_context(payload)
+    if errors:
+        for error in errors:
+            print(f"[FAIL] {error}")
+        return 1
+    print(f"[PASS] {path}")
+    return 0
+
+
+def cmd_context_show(args: argparse.Namespace) -> int:
+    try:
+        payload, path = context_mod.load_context(args.target)
+    except ValueError as exc:
+        logger.error("context show: %s", exc)
+        return 2
+    print(json.dumps(context_mod.compact_context(payload, path=path), indent=2))
+    return 0
+
+
+def cmd_context_render(args: argparse.Namespace) -> int:
+    try:
+        payload, path = context_mod.load_context(args.target)
+    except ValueError as exc:
+        logger.error("context render: %s", exc)
+        return 2
+    direction_path = path.parent / context_mod.DIRECTION_FILENAME
+    if direction_path.is_symlink():
+        logger.error("refusing symlink direction output: %s", direction_path)
+        return 2
+    direction_path.write_text(context_mod.render_direction(payload), encoding="utf-8")
+    logger.info("human direction written to %s", direction_path)
+    return 0
+
+
+def cmd_workshop_schema(args: argparse.Namespace) -> int:
+    """Print the authoring schema without requiring a workshop session."""
+    path = asset_path("workshop", f"{args.kind}.schema.json")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error("workshop schema: cannot read %s: %s", path, exc)
+        return 2
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_workshop_validate(args: argparse.Namespace) -> int:
+    try:
+        _payload, path = workshop_mod.load_spec(args.spec)
+    except workshop_mod.WorkshopError as exc:
+        logger.error("workshop validate: %s", exc)
+        return 1
+    print(f"[PASS] {path}")
+    return 0
+
+
+def cmd_workshop_serve(args: argparse.Namespace) -> int:
+    try:
+        spec, _path = workshop_mod.load_spec(args.spec)
+        destination = workshop_mod.serve(
+            spec,
+            response_path=args.response,
+            port=args.port,
+            timeout_seconds=args.timeout,
+            open_browser=not args.no_open,
+            ready_path=args.ready_file,
+            overwrite=args.overwrite,
+            on_ready=lambda url: print(url, flush=True),
+        )
+    except workshop_mod.WorkshopError as exc:
+        logger.error("workshop serve: %s", exc)
+        return 1
+    logger.info("workshop response written to %s", destination)
+    return 0
+
+
+def cmd_workshop_summarize(args: argparse.Namespace) -> int:
+    try:
+        spec, _spec_path = workshop_mod.load_spec(args.spec)
+        response, _response_path = workshop_mod.load_response(args.response, spec)
+    except workshop_mod.WorkshopError as exc:
+        logger.error("workshop summarize: %s", exc)
+        return 2
+    summary = workshop_mod.summarize_response(spec, response)
+    rendered = json.dumps(summary, indent=2) + "\n"
+    if args.out:
+        destination = Path(args.out).expanduser()
+        if destination.is_symlink():
+            logger.error("workshop summarize: refusing symlink output: %s", destination)
+            return 2
+        if destination.exists() and not args.overwrite:
+            logger.error(
+                "workshop summarize: output already exists: %s (pass --overwrite to replace it)",
+                destination,
+            )
+            return 2
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(rendered, encoding="utf-8")
+        logger.info("workshop handoff written to %s", destination)
+    else:
+        print(rendered, end="")
+    return 0
+
+
+def cmd_workshop_promote(args: argparse.Namespace) -> int:
+    promotion_path = Path(args.promotion).expanduser()
+    try:
+        promotion = json.loads(promotion_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error("workshop promote: cannot read %s: %s", promotion_path, exc)
+        return 2
+    try:
+        context_path, direction_path = workshop_mod.promote_context(args.target, promotion)
+    except (ValueError, workshop_mod.WorkshopError) as exc:
+        logger.error("workshop promote: %s", exc)
+        return 2
+    logger.info("promoted reviewed direction to %s", context_path)
+    logger.info("refreshed human direction at %s", direction_path)
+    return 0
 
 
 def cmd_systemize(args: argparse.Namespace) -> int:
@@ -1150,10 +1306,118 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    pctx = sub.add_parser(
+        "context",
+        help="manage persistent project design direction under .keen/",
+    )
+    context_sub = pctx.add_subparsers(dest="context_cmd", required=True)
+    pctx_init = context_sub.add_parser("init", help="create .keen/design-context.json")
+    pctx_init.add_argument("target", nargs="?", default=".", help="project directory")
+    pctx_init.add_argument("--name", default=None, help="project name (defaults to directory name)")
+    pctx_init.add_argument("--stage", choices=context_mod.STAGES, default="explore")
+    pctx_init.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="replace an existing design context",
+    )
+    pctx_init.set_defaults(func=cmd_context_init)
+
+    for action, help_text, handler in (
+        ("validate", "validate a project design context", cmd_context_validate),
+        ("show", "print the bounded agent-facing context", cmd_context_show),
+        ("render", "refresh .keen/direction.md from the JSON context", cmd_context_render),
+    ):
+        child = context_sub.add_parser(action, help=help_text)
+        child.add_argument("target", nargs="?", default=".", help="project directory or JSON file")
+        child.set_defaults(func=handler)
+
+    pworkshop = sub.add_parser(
+        "workshop",
+        help="run a temporary local workshop for one high-leverage design decision",
+    )
+    workshop_sub = pworkshop.add_subparsers(dest="workshop_cmd", required=True)
+
+    pworkshop_schema = workshop_sub.add_parser(
+        "schema",
+        help="print the JSON Schema for an agent-authored workshop artifact",
+    )
+    pworkshop_schema.add_argument("kind", choices=("spec", "promotion"), nargs="?", default="spec")
+    pworkshop_schema.set_defaults(func=cmd_workshop_schema)
+
+    pworkshop_validate = workshop_sub.add_parser(
+        "validate",
+        help="validate a workshop spec before opening a browser",
+    )
+    pworkshop_validate.add_argument("spec", help="path to the agent-authored workshop spec JSON")
+    pworkshop_validate.set_defaults(func=cmd_workshop_validate)
+
+    pworkshop_serve = workshop_sub.add_parser(
+        "serve",
+        help="serve one private loopback workshop round and wait for the response",
+    )
+    pworkshop_serve.add_argument("spec", help="path to the validated workshop spec JSON")
+    pworkshop_serve.add_argument(
+        "--response", required=True, help="path for the temporary response JSON"
+    )
+    pworkshop_serve.add_argument(
+        "--port", type=int, default=0, help="loopback port; 0 chooses a free port"
+    )
+    pworkshop_serve.add_argument(
+        "--timeout",
+        type=float,
+        default=1800,
+        help="seconds to wait for submission (default: 1800)",
+    )
+    pworkshop_serve.add_argument(
+        "--no-open",
+        action="store_true",
+        default=False,
+        help="print the private URL without opening the default browser",
+    )
+    pworkshop_serve.add_argument(
+        "--ready-file",
+        default=None,
+        help="optional temporary JSON path for test/agent readiness polling",
+    )
+    pworkshop_serve.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="replace existing response and readiness files",
+    )
+    pworkshop_serve.set_defaults(func=cmd_workshop_serve)
+
+    pworkshop_summarize = workshop_sub.add_parser(
+        "summarize",
+        help="expand selected option ids into a bounded agent handoff",
+    )
+    pworkshop_summarize.add_argument("spec")
+    pworkshop_summarize.add_argument("response")
+    pworkshop_summarize.add_argument("--out", default=None)
+    pworkshop_summarize.add_argument("--overwrite", action="store_true", default=False)
+    pworkshop_summarize.set_defaults(func=cmd_workshop_summarize)
+
+    pworkshop_promote = workshop_sub.add_parser(
+        "promote",
+        help="promote an agent-authored, rendered-and-reviewed decision into design context",
+    )
+    pworkshop_promote.add_argument("target", help="project directory or design-context JSON")
+    pworkshop_promote.add_argument(
+        "promotion", help="validated promotion JSON created after critique"
+    )
+    pworkshop_promote.set_defaults(func=cmd_workshop_promote)
+
     pr = sub.add_parser("review", help="full pipeline: capture → decompose → analyze → report")
     _add_capture_args(pr)
     pr.add_argument("--out", default=None)
     pr.add_argument("--against", default=None, help=f"Audit against this system. {systems_help}")
+    pr.add_argument(
+        "--characterize",
+        action="store_true",
+        default=False,
+        help="also emit optional AI-default and visual-language characterization signals",
+    )
     pr.set_defaults(func=cmd_review)
 
     pc = sub.add_parser("capture", help="capture only")
@@ -1164,6 +1428,12 @@ def build_parser() -> argparse.ArgumentParser:
     pa = sub.add_parser("audit", help="analyze captures that already exist")
     pa.add_argument("target", help="path to a captures directory")
     pa.add_argument("--against", default=None, help=f"Audit against this system. {systems_help}")
+    pa.add_argument(
+        "--characterize",
+        action="store_true",
+        default=False,
+        help="also emit optional AI-default and visual-language characterization signals",
+    )
     pa.add_argument(
         "--allow-internal",
         action="store_true",
@@ -1188,6 +1458,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_capture_args(pcomp)
     pcomp.add_argument("--out", default=None)
     pcomp.add_argument("--against", required=True, help=f"Required. {systems_help}")
+    pcomp.add_argument(
+        "--characterize",
+        action="store_true",
+        default=False,
+        help="also emit optional AI-default and visual-language characterization signals",
+    )
     pcomp.set_defaults(func=cmd_compare)
 
     psys = sub.add_parser(
