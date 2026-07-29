@@ -22,11 +22,31 @@ from harness.slop import (
 )
 
 
+def _with_identity(
+    components: list[dict],
+    *,
+    capture: str = "desktop-default",
+) -> list[dict]:
+    return [
+        {
+            **component,
+            "viewport": component.get("viewport", "desktop"),
+            "state": component.get("state", "default"),
+            "capture_path": component.get(
+                "capture_path",
+                f"screens/p-{capture}.png",
+            ),
+        }
+        for component in components
+    ]
+
+
 def _write_run(tmp_path: Path, *, components: list[dict], tokens: dict) -> Path:
     """Lay out a minimal run directory the slop module can read."""
     (tmp_path / "components").mkdir(parents=True, exist_ok=True)
     (tmp_path / "tokens").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "components" / "p-desktop-default.json").write_text(json.dumps(components))
+    normalized = _with_identity(components)
+    (tmp_path / "components" / "p-desktop-default.json").write_text(json.dumps(normalized))
     (tmp_path / "tokens" / "extracted.json").write_text(json.dumps(tokens))
     return tmp_path
 
@@ -309,7 +329,9 @@ def test_repeated_capture_does_not_inflate_glass_surface_count(tmp_path: Path) -
         }
     ]
     for capture in ("desktop-default", "tablet-default", "mobile-default"):
-        (components_dir / f"page-{capture}.json").write_text(json.dumps(glass))
+        (components_dir / f"page-{capture}.json").write_text(
+            json.dumps(_with_identity(glass, capture=capture))
+        )
     (tokens_dir / "extracted.json").write_text("{}")
 
     report = analyze_slop(tmp_path)
@@ -335,7 +357,9 @@ def test_cross_capture_slop_uses_strongest_capture_instead_of_summing(tmp_path: 
     (multi / "components").mkdir(parents=True)
     (multi / "tokens").mkdir()
     for capture in ("desktop-default", "tablet-default", "mobile-default"):
-        (multi / "components" / f"page-{capture}.json").write_text(json.dumps(glass_surfaces()))
+        (multi / "components" / f"page-{capture}.json").write_text(
+            json.dumps(_with_identity(glass_surfaces(), capture=capture))
+        )
     (multi / "tokens" / "extracted.json").write_text("{}")
 
     single_report = analyze_slop(single)

@@ -29,4 +29,4 @@ temporary directory; do not commit the readiness file because it contains the
 short-lived local bearer URL.
 
 The latest completed release review is
-[Keen 0.8.0 security review](plugins/keen/docs/security-review-0.8.0.md).
+[Keen 0.8.1 security review](plugins/keen/docs/security-review-0.8.1.md).

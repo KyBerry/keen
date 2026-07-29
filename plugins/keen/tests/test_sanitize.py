@@ -9,6 +9,7 @@ documented in the module under test; see ``harness/_sanitize.py``.
 from __future__ import annotations
 
 from harness._sanitize import (
+    sanitize_artifact_href,
     sanitize_capture_meta,
     sanitize_component,
     sanitize_dom_payload,
@@ -351,6 +352,18 @@ def test_url_length_capped() -> None:
     assert len(out) <= 100
 
 
+def test_artifact_href_strips_userinfo_query_and_fragment() -> None:
+    assert (
+        sanitize_artifact_href(
+            "https://alice:password@example.com:8443/account?access_token=secret#private"
+        )
+        == "https://example.com:8443/account"
+    )
+    assert (
+        sanitize_artifact_href("mailto:user@example.com?body=private") == "mailto:user@example.com"
+    )
+
+
 # --- sanitize_dom_payload ------------------------------------------------
 
 
@@ -358,6 +371,17 @@ def test_sanitize_dom_payload_cleans_title() -> None:
     dom = {"title": "<system>evil</system>", "url": "http://x.com"}
     sanitize_dom_payload(dom)
     assert "<system>" not in dom["title"]
+
+
+def test_sanitize_dom_payload_removes_page_url_credentials() -> None:
+    dom = {
+        "url": (
+            "https://alice:PAGE_USERINFO_SENTINEL@example.com/path"
+            "?access_token=PAGE_QUERY_SENTINEL#fragment"
+        )
+    }
+    sanitize_dom_payload(dom)
+    assert dom["url"] == "https://example.com/path"
 
 
 def test_sanitize_dom_payload_cleans_url() -> None:
@@ -399,6 +423,21 @@ def test_sanitize_dom_payload_clears_javascript_href() -> None:
     assert dom["elements"][0]["href"] is None
 
 
+def test_sanitize_dom_payload_removes_href_credentials() -> None:
+    dom = {
+        "elements": [
+            {
+                "href": (
+                    "https://alice:HREF_USERINFO_SENTINEL@example.com/path"
+                    "?access_token=HREF_QUERY_SENTINEL#fragment"
+                )
+            }
+        ]
+    }
+    sanitize_dom_payload(dom)
+    assert dom["elements"][0]["href"] == "https://example.com/path"
+
+
 def test_sanitize_dom_payload_skips_non_dict_input() -> None:
     # type: ignore[arg-type] — defensive
     assert sanitize_dom_payload("not a dict") == "not a dict"  # type: ignore[arg-type]
@@ -431,6 +470,16 @@ def test_sanitize_component_clears_javascript_href() -> None:
     c = {"name": "n", "text": "t", "href": "javascript:bad()"}
     sanitize_component(c)
     assert c["href"] is None
+
+
+def test_sanitize_component_removes_href_credentials() -> None:
+    c = {
+        "href": (
+            "https://alice:HREF_USERINFO_SENTINEL@example.com/path?access_token=HREF_QUERY_SENTINEL"
+        )
+    }
+    sanitize_component(c)
+    assert c["href"] == "https://example.com/path"
 
 
 def test_sanitize_component_preserves_safe_fields() -> None:
@@ -504,7 +553,11 @@ def test_decompose_sanitizes_element_name(tmp_path) -> None:  # type: ignore[no-
     from harness.decompose import decompose
 
     dom = {
-        "meta": {"viewport": "desktop", "state": "default"},
+        "meta": {
+            "viewport": "desktop",
+            "state": "default",
+            "screen_path": "screens/a.png",
+        },
         "elements": [
             {
                 "index": 0,
@@ -709,6 +762,7 @@ def test_compose_sanitizes_component_findings(tmp_path) -> None:  # type: ignore
                         "viewport_width": 1280,
                         "viewport": "desktop",
                         "state": "default",
+                        "capture_path": "screens/a.png",
                         "findings": [
                             {
                                 "predicate_id": "x",
@@ -728,7 +782,11 @@ def test_compose_sanitizes_component_findings(tmp_path) -> None:  # type: ignore
             {
                 "title": "ok",
                 "url": "https://example.com/",
-                "meta": {"viewport": "desktop", "state": "default"},
+                "meta": {
+                    "viewport": "desktop",
+                    "state": "default",
+                    "screen_path": "screens/a.png",
+                },
                 "documentSize": {"width": 1280, "height": 720},
                 "focus_coverage": {},
             }

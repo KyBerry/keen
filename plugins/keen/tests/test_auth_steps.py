@@ -20,10 +20,15 @@ import pytest
 from harness.capture import (
     _ALLOWED_AUTH_ACTIONS,
     _AUTH_STEPS_MAX_BYTES,
+    MAX_AUTH_STORAGE_STATE_BYTES,
+    AuthSession,
     CaptureConfig,
+    _bounded_auth_storage_state,
     _env_required,
+    _install_session_storage_seed,
     _parse_eval_safe,
     _prepare_auth_storage_state,
+    _validate_auth_environment,
     _validate_env_name,
     _validate_selector,
     apply_auth_steps,
@@ -355,6 +360,22 @@ def test_fill_value_env_present_validates(monkeypatch: pytest.MonkeyPatch) -> No
     assert steps[0]["value_env"] == "KEEN_TEST_PWD"
 
 
+def test_auth_environment_reports_missing_variable_without_reading_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("KEEN_MISSING_PREFLIGHT", raising=False)
+    with pytest.raises(ValueError, match="env var KEEN_MISSING_PREFLIGHT not set"):
+        _validate_auth_environment(
+            [
+                {
+                    "action": "fill",
+                    "selector": "#password",
+                    "value_env": "KEEN_MISSING_PREFLIGHT",
+                }
+            ]
+        )
+
+
 @pytest.mark.asyncio
 async def test_apply_auth_steps_env_missing_raises(tmp_path: Path) -> None:
     """The full happy-path test for env-missing — uses a mock Page so no browser is needed."""
@@ -410,9 +431,106 @@ async def test_authentication_storage_state_is_prepared_once_in_memory(tmp_path:
         {"desktop": {"width": 1440, "height": 900, "deviceScaleFactor": 1}},
     )
 
-    assert state == {"cookies": [], "origins": []}
-    context.storage_state.assert_awaited_once()
+    assert state == AuthSession(storage_state={"cookies": [], "origins": []})
+    context.storage_state.assert_awaited_once_with(indexed_db=True)
     context.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_interactive_auth_is_user_driven_and_memory_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browser = mock.AsyncMock()
+    context = mock.AsyncMock()
+    page = mock.AsyncMock()
+    page.url = "https://example.com/dashboard"
+    page.evaluate.return_value = {
+        "origin": "https://example.com",
+        "entries": [["session-token", "sensitive-value"]],
+    }
+    context.new_page.return_value = page
+    context.storage_state.return_value = {
+        "cookies": [{"name": "session", "value": "sensitive-cookie"}],
+        "origins": [],
+    }
+    browser.new_context.return_value = context
+    context.pages = [page]
+    confirmed = mock.Mock()
+    monkeypatch.setattr("harness.capture._wait_for_interactive_auth_confirmation", confirmed)
+    cfg = CaptureConfig(
+        target="https://example.com/dashboard",
+        viewports=["desktop"],
+        interactive_auth=True,
+    )
+
+    session = await _prepare_auth_storage_state(
+        browser,
+        cfg,
+        {"desktop": {"width": 1440, "height": 900, "deviceScaleFactor": 1}},
+    )
+
+    confirmed.assert_called_once()
+    assert session is not None
+    assert session.storage_state["cookies"][0]["value"] == "sensitive-cookie"
+    assert session.session_storage == {"https://example.com": {"session-token": "sensitive-value"}}
+    context.storage_state.assert_awaited_once_with(indexed_db=True)
+    context.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_interactive_auth_snapshots_session_storage_from_oauth_popup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browser = mock.AsyncMock()
+    context = mock.AsyncMock()
+    landing_page = mock.AsyncMock()
+    popup_page = mock.AsyncMock()
+    popup_page.evaluate.return_value = {
+        "origin": "https://example.com",
+        "entries": [["oauth-session", "popup-value"]],
+    }
+    context.new_page.return_value = landing_page
+    context.pages = [landing_page, popup_page]
+    context.storage_state.return_value = {"cookies": [], "origins": []}
+    browser.new_context.return_value = context
+    monkeypatch.setattr(
+        "harness.capture._wait_for_interactive_auth_confirmation",
+        mock.Mock(),
+    )
+
+    session = await _prepare_auth_storage_state(
+        browser,
+        CaptureConfig(
+            target="https://example.com/dashboard",
+            viewports=["desktop"],
+            interactive_auth=True,
+        ),
+        {"desktop": {"width": 1440, "height": 900, "deviceScaleFactor": 1}},
+    )
+
+    assert session is not None
+    assert session.session_storage == {"https://example.com": {"oauth-session": "popup-value"}}
+    popup_page.evaluate.assert_awaited_once()
+    landing_page.evaluate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_session_storage_seed_is_json_encoded_as_inert_data() -> None:
+    context = mock.AsyncMock()
+    await _install_session_storage_seed(
+        context,
+        {
+            "https://example.com": {
+                "token": '"; globalThis.pwned = true; //',
+            }
+        },
+    )
+
+    script = context.add_init_script.await_args.kwargs["script"]
+    seed_json = script.split("const seed=", 1)[1].split(";const entries=", 1)[0]
+    decoded = json.loads(seed_json)
+    assert decoded["https://example.com"]["token"] == '"; globalThis.pwned = true; //'
+    assert '"token":"\\"; globalThis.pwned = true; //"' in seed_json
 
 
 def test_apply_auth_steps_bad_json(tmp_path: Path) -> None:
@@ -523,6 +641,48 @@ def test_goto_url_loopback_rejected() -> None:
     panels (Redis, internal HTTP services on the runner)."""
     with pytest.raises(ValueError, match=r"(?i)loopback|private"):
         validate_auth_steps({"steps": [{"action": "goto", "url": "http://127.0.0.1:6379/"}]})
+
+
+def test_goto_url_loopback_requires_explicit_internal_policy() -> None:
+    steps = validate_auth_steps(
+        {
+            "steps": [
+                {
+                    "action": "goto",
+                    "url": "http://127.0.0.1:3000/sign-in",
+                }
+            ]
+        },
+        allow_internal=True,
+    )
+
+    assert steps[0]["url"] == "http://127.0.0.1:3000/sign-in"
+
+
+@pytest.mark.asyncio
+async def test_apply_auth_steps_propagates_internal_policy(tmp_path: Path) -> None:
+    steps_file = tmp_path / "auth.json"
+    steps_file.write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "action": "goto",
+                        "url": "http://127.0.0.1:3000/sign-in",
+                    }
+                ]
+            }
+        )
+    )
+    page = mock.AsyncMock()
+
+    await apply_auth_steps(page, steps_file, allow_internal=True)
+
+    page.goto.assert_awaited_once_with(
+        "http://127.0.0.1:3000/sign-in",
+        timeout=30_000,
+        wait_until="domcontentloaded",
+    )
 
 
 # -- Hardening: eval_safe regex anchor robustness (gap B) -----------------
@@ -777,6 +937,58 @@ def test_wait_for_url_at_cap_accepted() -> None:
     validate_auth_steps(
         {"steps": [{"action": "wait_for_url", "pattern": "**/x", "timeout_ms": 60_000}]}
     )
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        {"action": "goto", "url": "https://example.com"},
+        {"action": "wait_for_selector", "selector": "#ready"},
+        {"action": "wait_for_url", "pattern": "**/ready"},
+        {"action": "fill", "selector": "#email", "value": "a"},
+        {"action": "click", "selector": "button"},
+        {"action": "press", "selector": "input", "key": "Enter"},
+        {"action": "check", "selector": "#remember"},
+        {"action": "uncheck", "selector": "#remember"},
+        {"action": "select_option", "selector": "select", "value": "one"},
+    ],
+)
+@pytest.mark.parametrize("timeout_ms", [0, 60_001])
+def test_every_playwright_auth_timeout_is_strictly_bounded(
+    step: dict[str, object],
+    timeout_ms: int,
+) -> None:
+    with pytest.raises(ValueError, match="timeout_ms"):
+        validate_auth_steps({"steps": [{**step, "timeout_ms": timeout_ms}]})
+
+
+def test_wait_for_url_rejects_authority_wildcard() -> None:
+    with pytest.raises(ValueError, match="only in the path"):
+        validate_auth_steps(
+            {
+                "steps": [
+                    {
+                        "action": "wait_for_url",
+                        "pattern": "https://*/dashboard",
+                    }
+                ]
+            }
+        )
+
+
+def test_auth_storage_state_is_bounded_before_matrix_fanout() -> None:
+    oversized = {
+        "cookies": [],
+        "origins": [
+            {
+                "origin": "https://example.com",
+                "localStorage": [],
+                "indexedDB": [{"value": "x" * MAX_AUTH_STORAGE_STATE_BYTES}],
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="safe in-memory size"):
+        _bounded_auth_storage_state(oversized)
 
 
 # -- Hardening: closed dispatch table (gap I) -----------------------------

@@ -60,15 +60,15 @@ def _expect_block(url: str, pattern: str = "blocked target") -> None:
 # Vector 1: DNS rebinding (TOCTOU between validator resolve and goto resolve)
 # =========================================================================
 #
-# Status BEFORE hardening: BYPASSED (no request-time re-check).
-# Status AFTER hardening: BLOCKED at request-time route handler.
+# A request-time check detects the unsafe answer when Python's resolver sees
+# it. It does not pin Chromium's independent DNS result, so this is a
+# mitigation regression rather than proof that all rebinding races are closed.
 #
 # We can't end-to-end exercise a real malicious DNS server in a unit test,
 # so we simulate the "second resolution returns a private IP" half of the
 # attack by stubbing the resolver. The route handler in capture.py calls
 # `revalidate_target_at_request_time` which performs THE SAME getaddrinfo
-# call we stub here — so a rebound IP gets rejected. The integration is
-# verified by `test_dns_rebinding_secondary_resolve_blocked`.
+# call we stub here — so a rebound IP visible to that check gets rejected.
 
 
 def test_dns_rebinding_secondary_resolve_blocked(
@@ -353,21 +353,23 @@ def test_userinfo_does_not_mask_blocked_host() -> None:
     # Using monkeypatch fixture indirectly via direct mock here:
     import unittest.mock as _mock
 
-    with _mock.patch.object(
-        socket,
-        "getaddrinfo",
-        return_value=[
-            (
-                socket.AF_INET,
-                socket.SOCK_STREAM,
-                0,
-                "",
-                ("93.184.216.34", 0),
-            )
-        ],
+    with (
+        _mock.patch.object(
+            socket,
+            "getaddrinfo",
+            return_value=[
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    0,
+                    "",
+                    ("93.184.216.34", 0),
+                )
+            ],
+        ),
+        pytest.raises(ValueError, match="userinfo"),
     ):
-        result = validate_target("http://169.254.169.254@example.com/")
-        assert result == "http://169.254.169.254@example.com/"
+        validate_target("http://169.254.169.254@example.com/")
 
 
 def test_userinfo_with_blocked_real_host_blocked() -> None:
@@ -375,7 +377,7 @@ def test_userinfo_with_blocked_real_host_blocked() -> None:
     host is loopback. Must block."""
     _expect_block(
         "http://decoy@127.0.0.1/",
-        pattern="loopback IP",
+        pattern="userinfo",
     )
 
 

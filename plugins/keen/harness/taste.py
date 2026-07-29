@@ -22,7 +22,6 @@ Pure Python — no model calls.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections import Counter
@@ -30,6 +29,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from harness import _artifacts as artifacts_mod
 from harness._oklch import hex_to_oklch
 from harness.colors import is_neutral_hex, to_hex
 
@@ -100,26 +100,32 @@ class TasteVector:
 
 def _all_components(captures_dir: Path) -> list[dict]:
     out: list[dict] = []
-    cdir = captures_dir / "components"
-    if not cdir.exists():
-        return out
-    for path in sorted(cdir.glob("*.json")):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(data, list):
-            out.extend(data)
+    evidence = artifacts_mod.capture_evidence(captures_dir)
+    paths = artifacts_mod.stage_paths(captures_dir, "components", evidence.dom_paths)
+    if evidence.legacy and not evidence.dom_paths:
+        paths = tuple(sorted((captures_dir / "components").glob("*.json")))
+    elif evidence.manifest is not None and len(paths) != len(evidence.dom_paths):
+        raise artifacts_mod.ArtifactIntegrityError(
+            "component artifacts are incomplete for the current capture manifest"
+        )
+    for path in paths:
+        data = artifacts_mod.read_component_list(path)
+        out.extend(data)
     return out
 
 
 def _tokens(captures_dir: Path) -> dict[str, Any]:
+    evidence = artifacts_mod.capture_evidence(captures_dir)
+    if evidence.manifest is not None:
+        from harness import tokens as tokens_mod
+
+        return tokens_mod.extract_from_captures(captures_dir)
     path = captures_dir / "tokens" / "extracted.json"
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return artifacts_mod.read_json_object(path)
+    except artifacts_mod.ArtifactIntegrityError:
         return {}
 
 

@@ -10,7 +10,6 @@ the durable context update.
 from __future__ import annotations
 
 import json
-import os
 import re
 import secrets
 import threading
@@ -24,6 +23,7 @@ from socketserver import TCPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from harness import _safeio as safeio_mod
 from harness import design_context as context_mod
 from harness._assets import asset_path
 from harness._sanitize import sanitize_untrusted_text
@@ -607,22 +607,10 @@ def validate_promotion(payload: Any) -> list[str]:
 
 
 def _atomic_write(path: Path, text: str) -> None:
-    if path.is_symlink():
-        raise WorkshopError(f"refusing symlink output: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
     try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(text)
-        os.replace(temporary, path)
-        # Workshop readiness URLs contain the bearer token, and responses can
-        # contain private product decisions. Keep both owner-only even when a
-        # permissive process umask is in effect.
-        os.chmod(path, 0o600)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+        safeio_mod.atomic_write_text(path.parent, path, text, mode=0o600)
+    except safeio_mod.UnsafeOutputError as exc:
+        raise WorkshopError(str(exc)) from None
 
 
 def promote_context(target: str | Path, promotion: dict[str, Any]) -> tuple[Path, Path]:

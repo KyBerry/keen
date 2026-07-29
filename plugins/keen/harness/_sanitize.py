@@ -39,6 +39,7 @@ from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 __all__ = [
+    "sanitize_artifact_href",
     "sanitize_capture_meta",
     "sanitize_component",
     "sanitize_dom_payload",
@@ -328,6 +329,46 @@ def sanitize_url(s: Any, *, max_len: int = 512) -> str:
     return normalized
 
 
+def sanitize_artifact_href(s: Any, *, max_len: int = 512) -> str:
+    """Sanitize a page-authored link without retaining credential material.
+
+    Element hrefs are diagnostic context, not navigation instructions. Their
+    query strings, fragments, and URL userinfo add no design evidence but
+    commonly contain bearer tokens, signed links, email-prefill content, or
+    embedded credentials. Keep only the scheme, host/port, and path.
+    """
+    sanitized = sanitize_url(s, max_len=0)
+    if not sanitized:
+        return ""
+    try:
+        parsed = urlparse(sanitized)
+        port = parsed.port
+    except ValueError:
+        return ""
+    scheme = parsed.scheme.lower()
+    if scheme in {"http", "https"}:
+        host = parsed.hostname
+        if not host:
+            return ""
+        host_display = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        netloc = f"{host_display}:{port}" if port is not None else host_display
+    elif scheme == "file":
+        if parsed.netloc:
+            return ""
+        netloc = ""
+    elif scheme == "mailto":
+        netloc = ""
+    else:
+        return ""
+    try:
+        normalized = urlunparse((scheme, netloc, parsed.path, parsed.params, "", ""))
+    except ValueError:
+        return ""
+    if max_len > 0 and len(normalized) > max_len:
+        normalized = normalized[: max_len - 1] + "…"
+    return normalized
+
+
 def sanitize_dom_payload(dom: dict[str, Any]) -> dict[str, Any]:
     """Sanitize the page-derived strings in a parsed dom dump *in place*.
 
@@ -342,7 +383,7 @@ def sanitize_dom_payload(dom: dict[str, Any]) -> dict[str, Any]:
     if "title" in dom:
         dom["title"] = sanitize_untrusted_text(dom.get("title"))
     if "url" in dom:
-        dom["url"] = sanitize_url(dom.get("url"))
+        dom["url"] = sanitize_artifact_href(dom.get("url"))
     if "documentBackgroundColor" in dom:
         dom["documentBackgroundColor"] = sanitize_untrusted_text(
             dom.get("documentBackgroundColor"),
@@ -367,7 +408,7 @@ def sanitize_dom_payload(dom: dict[str, Any]) -> dict[str, Any]:
                 # never followed. Strip control chars but allow them to fail
                 # the scheme check (in which case we set them to None so the
                 # report doesn't carry a dangling ``javascript:`` string).
-                sanitized = sanitize_url(elem.get("href"))
+                sanitized = sanitize_artifact_href(elem.get("href"))
                 elem["href"] = sanitized or None
 
     return dom
@@ -387,7 +428,7 @@ def sanitize_component(c: dict[str, Any]) -> dict[str, Any]:
     if "text" in c:
         c["text"] = sanitize_untrusted_text(c.get("text"))
     if "href" in c and c.get("href"):
-        sanitized = sanitize_url(c.get("href"))
+        sanitized = sanitize_artifact_href(c.get("href"))
         c["href"] = sanitized or None
     return c
 
@@ -426,5 +467,5 @@ def sanitize_capture_meta(meta: dict[str, Any]) -> dict[str, Any]:
     if "title" in meta:
         meta["title"] = sanitize_untrusted_text(meta.get("title"))
     if "url" in meta:
-        meta["url"] = sanitize_url(meta.get("url"))
+        meta["url"] = sanitize_artifact_href(meta.get("url"))
     return meta

@@ -80,6 +80,97 @@ def test_parser_recognizes_subcommands() -> None:
     assert args.run_a == "/tmp/a"
 
 
+def test_capture_parser_exposes_integrity_and_interactive_auth_options() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "capture",
+            "https://example.com/poc",
+            "--expect-url",
+            "https://example.com/poc",
+            "--expect-selector",
+            "[data-poc-ready]",
+            "--interactive-auth",
+        ]
+    )
+
+    assert args.expect_url == "https://example.com/poc"
+    assert args.wait_selector == "[data-poc-ready]"
+    assert args.interactive_auth is True
+
+
+def test_capture_parser_keeps_wait_selector_as_compatibility_alias() -> None:
+    args = cli.build_parser().parse_args(
+        ["capture", "https://example.com", "--wait-selector", "main"]
+    )
+    assert args.wait_selector == "main"
+
+
+def test_capture_parser_auth_modes_are_mutually_exclusive() -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            [
+                "capture",
+                "https://example.com",
+                "--interactive-auth",
+                "--auth-steps",
+                "auth.json",
+            ]
+        )
+
+
+def test_interactive_auth_refuses_unattended_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli.capture_mod, "validate_target", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.capture_mod, "_interactive_terminal_available", lambda: False)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "capture",
+                "https://example.com/account",
+                "--interactive-auth",
+                "--viewports",
+                "desktop",
+                "--out",
+                str(tmp_path / "capture"),
+            ]
+        )
+
+    assert exc.value.code == 1
+
+
+def test_invalid_overwrite_preflight_preserves_previous_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = tmp_path / "review"
+    out.mkdir()
+    old_report = out / "report.json"
+    old_report.write_text('{"previous": true}')
+    monkeypatch.setattr(
+        cli.capture_mod,
+        "validate_target",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "capture",
+                "https://example.com",
+                "--expect-url",
+                "/not-absolute",
+                "--out",
+                str(out),
+                "--overwrite",
+            ]
+        )
+
+    assert old_report.read_text() == '{"previous": true}'
+
+
 def test_context_lifecycle_commands_round_trip(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
@@ -153,7 +244,8 @@ def test_cmd_intent_run_dir(tmp_path: Path, capsys: pytest.CaptureFixture) -> No
         "captures": [],
         "annotated_overviews": {},
         "top_findings": [],
-        "score": {"grade": "A"},
+        "components": [],
+        "score": {"grade": "A", "score": 0},
     }
     rd = tmp_path / "run"
     rd.mkdir()
@@ -165,6 +257,41 @@ def test_cmd_intent_run_dir(tmp_path: Path, capsys: pytest.CaptureFixture) -> No
     assert parsed["mode"] == "run-dir"
     assert "instruction" not in parsed
     assert parsed["evidence_contract"]["finding_key"] == "predicate_id"
+
+
+def test_cmd_intent_accepts_reviewable_manual_visual_report(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    report = {
+        "review_status": {"status": "provisional", "reviewable": True},
+        "coverage": {
+            "status": "provisional",
+            "reviewable": True,
+            "reason": "no-analyzable-content",
+        },
+        "captures": [
+            {
+                "viewport": "desktop",
+                "state": "default",
+                "screen_path": "screens/canvas.png",
+                "manual_review_needed": True,
+            }
+        ],
+        "annotated_overviews": {},
+        "top_findings": [],
+        "components": [],
+        "score": {"grade": "INCOMPLETE", "score": None},
+    }
+    run = tmp_path / "canvas-run"
+    run.mkdir()
+    (run / "report.json").write_text(json.dumps(report))
+
+    assert cli.main(["intent", str(run)]) == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["grade"] == "INCOMPLETE"
+    assert parsed["captures"][0]["manual_review_needed"] is True
+    assert parsed["captures"][0]["screen_path"] == "screens/canvas.png"
 
 
 def test_cmd_intent_missing_report_exits_2(tmp_path: Path) -> None:
@@ -234,6 +361,126 @@ def test_cmd_audit_missing_target_exits_2(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main(["audit", str(tmp_path / "nope")])
     assert exc.value.code == 2
+
+
+def test_cmd_audit_refuses_diagnostic_only_capture(tmp_path: Path) -> None:
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    (captures / "screens").mkdir()
+    (captures / "dom").mkdir()
+    (captures / "screens" / "poc-desktop-default.png").write_bytes(b"diagnostic")
+    (captures / "dom" / "poc-desktop-default.json").write_text(
+        json.dumps(
+            {
+                "meta": {
+                    "screen_path": "screens/poc-desktop-default.png",
+                    "viewport": "desktop",
+                    "state": "default",
+                },
+                "coverage": {
+                    "expectation": {
+                        "status": "blocked",
+                        "reason_code": "unexpected-url",
+                    }
+                },
+            }
+        )
+    )
+    (captures / "capture-manifest.json").write_text(
+        json.dumps(
+            {
+                "target": "https://example.com/poc",
+                "requested": [{"viewport": "desktop", "state": "default"}],
+                "succeeded": [],
+                "failures": [
+                    {
+                        "viewport": "desktop",
+                        "state": "default",
+                        "reason_code": "unexpected-url",
+                        "reason": "redirected to sign-in",
+                        "screen": "screens/poc-desktop-default.png",
+                        "dom": "dom/poc-desktop-default.json",
+                        "diagnostic_only": True,
+                    }
+                ],
+                "complete": False,
+                "reviewable": False,
+                "status": "blocked",
+            }
+        )
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["audit", str(captures)])
+
+    assert exc.value.code == 1
+    assert not (captures / "report.json").exists()
+    brief = json.loads((captures / "agent-brief.json").read_text())
+    assert brief["review_status"]["status"] == "blocked"
+    assert brief["grade"] is None
+
+
+@pytest.mark.parametrize("manifest_text", ["{broken", "[]"])
+def test_cmd_audit_fails_closed_on_invalid_capture_manifest(
+    tmp_path: Path,
+    manifest_text: str,
+) -> None:
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    (captures / "capture-manifest.json").write_text(manifest_text)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["audit", str(captures)])
+
+    assert exc.value.code == 1
+    brief = json.loads((captures / "agent-brief.json").read_text())
+    assert brief["review_status"]["status"] == "failed"
+    assert brief["review_status"]["reviewable"] is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["tokens", "{run}"],
+        ["systemize", "{run}"],
+        ["intent", "{run}"],
+        ["taste", "{run}"],
+        ["slop", "{run}"],
+        ["diff", "{run}", "{run}"],
+    ],
+)
+def test_downstream_commands_refuse_diagnostic_only_capture(
+    tmp_path: Path,
+    command: list[str],
+) -> None:
+    captures = tmp_path / "blocked"
+    captures.mkdir()
+    (captures / "capture-manifest.json").write_text(
+        json.dumps(
+            {
+                "requested": [{"viewport": "desktop", "state": "default"}],
+                "succeeded": [],
+                "failures": [
+                    {
+                        "viewport": "desktop",
+                        "state": "default",
+                        "reason_code": "unexpected-url",
+                        "reason": "redirected",
+                        "diagnostic_only": True,
+                    }
+                ],
+                "complete": False,
+                "reviewable": False,
+                "status": "blocked",
+            }
+        )
+    )
+    argv = [part.format(run=str(captures)) for part in command]
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+
+    assert exc.value.code == 1
 
 
 def test_cmd_intent_single_image_mode(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:

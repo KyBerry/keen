@@ -8,14 +8,18 @@ component crops when triaging a screen.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
 from harness import __version__, _html_report
+from harness import _artifacts as artifacts_mod
+from harness import _safeio as safeio_mod
 from harness import design_context as context_mod
 from harness import rubric as rubric_mod
+from harness import tokens as tokens_mod
 from harness._sanitize import (
     sanitize_capture_meta,
     sanitize_component,
@@ -33,6 +37,175 @@ SEVERITY_COLORS = {
 }
 
 
+def _load_capture_manifest(captures_dir: Path) -> dict[str, Any] | None:
+    try:
+        return artifacts_mod.load_capture_manifest(captures_dir)
+    except artifacts_mod.ArtifactIntegrityError as exc:
+        return {
+            "requested": [],
+            "succeeded": [],
+            "failures": [
+                {
+                    "viewport": "unknown",
+                    "state": "unknown",
+                    "reason_code": exc.reason_code,
+                    "reason": "capture evidence failed integrity validation",
+                }
+            ],
+            "complete": False,
+            "reviewable": False,
+            "status": "failed",
+            "_manifest_present": True,
+            "integrity_error": sanitize_untrusted_text(str(exc), max_len=300),
+        }
+
+
+def _capture_failure_status(manifest: dict[str, Any]) -> dict[str, Any]:
+    failures = manifest.get("failures")
+    if not isinstance(failures, list):
+        failures = []
+    blocked = manifest.get("status") == "blocked" or any(
+        isinstance(failure, dict)
+        and (
+            failure.get("diagnostic_only") is True
+            or failure.get("reason_code")
+            in {
+                "unexpected-url",
+                "missing-selector",
+                "blocked-legacy-capture",
+            }
+        )
+        for failure in failures
+    )
+    status = "blocked" if blocked else "failed"
+    message = (
+        "The requested product surface was not captured, so no design analysis or grade was issued."
+        if blocked
+        else "Browser capture failed before a reviewable surface was available, so no design analysis or grade was issued."
+    )
+    return {
+        "status": status,
+        "reviewable": False,
+        "message": message,
+        "next_actions": [
+            "Inspect the diagnostic screenshot and capture-manifest.json.",
+            (
+                "Authenticate with --auth-steps or --interactive-auth, or declare the "
+                "intended redirect with --expect-url."
+            ),
+            "Run Keen again against the intended product surface.",
+        ],
+    }
+
+
+def _manifest_is_reviewable(manifest: dict[str, Any]) -> bool:
+    return manifest.get("reviewable") is True
+
+
+def build_capture_failure_brief(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Build an agent-first stop artifact without exposing browser credentials."""
+    status = _capture_failure_status(manifest)
+    failures = manifest.get("failures")
+    if not isinstance(failures, list):
+        failures = []
+    diagnostics: list[dict[str, Any]] = []
+    for failure in failures[:12]:
+        if not isinstance(failure, dict):
+            continue
+        reason_code = sanitize_untrusted_text(
+            failure.get("reason_code") or "capture-failed",
+            max_len=64,
+        )
+        reason = {
+            "unexpected-url": "The browser reached a different URL than the intended review surface.",
+            "missing-selector": "The expected product-surface selector was not present.",
+        }.get(reason_code, "Browser capture failed before review could begin.")
+        diagnostics.append(
+            {
+                "viewport": sanitize_untrusted_text(failure.get("viewport"), max_len=64),
+                "state": sanitize_untrusted_text(failure.get("state"), max_len=64),
+                "reason_code": reason_code,
+                "reason": reason,
+                "expected_url": sanitize_untrusted_text(
+                    failure.get("expected_url"),
+                    max_len=300,
+                ),
+                "observed_url": sanitize_untrusted_text(
+                    failure.get("observed_url"),
+                    max_len=300,
+                ),
+                "expected_selector": sanitize_untrusted_text(
+                    failure.get("expected_selector"),
+                    max_len=512,
+                ),
+                "screen_path": sanitize_untrusted_text(failure.get("screen"), max_len=300),
+                "dom_path": sanitize_untrusted_text(failure.get("dom"), max_len=300),
+                "diagnostic_only": bool(failure.get("diagnostic_only")),
+            }
+        )
+    requested = manifest.get("requested")
+    succeeded = manifest.get("succeeded")
+    requested_count = len(requested) if isinstance(requested, list) else 0
+    succeeded_count = len(succeeded) if isinstance(succeeded, list) else 0
+    return {
+        "version": __version__,
+        "review_status": status,
+        "coverage": {
+            "complete": False,
+            "provisional": True,
+            "reviewable": False,
+            "status": status["status"],
+            "captures_requested": requested_count,
+            "captures_complete": succeeded_count,
+            "captures_succeeded": succeeded_count,
+            "capture_failures": len(failures),
+            "manifest_present": bool(manifest.get("_manifest_present", True)),
+        },
+        "grade": None,
+        "damage": None,
+        "grade_summary": status["message"],
+        "counts": {},
+        "captures": [],
+        "diagnostics": diagnostics,
+        "top_findings": [],
+        "automated_signal_summary": {
+            "band": None,
+            "weighted_index": None,
+            "counts": {},
+            "meaning": "No automated design analysis ran because capture integrity was not established.",
+        },
+        "decision_contract": {
+            "code_provides": "a capture-integrity stop and bounded diagnostic evidence",
+            "model_decides": "how to restore legitimate access without weakening product authentication",
+            "requirements": [
+                "Do not critique or score the diagnostic page.",
+                "Do not weaken shipped authentication solely to satisfy Keen.",
+                "Prefer declarative authentication or explicit user-driven interactive authentication.",
+            ],
+        },
+        "artifacts": {
+            "capture_manifest": "capture-manifest.json",
+            "diagnostic_screens": "screens/",
+            "diagnostic_dom": "dom/",
+        },
+    }
+
+
+def write_capture_failure_brief(captures_dir: Path) -> Path | None:
+    """Write agent-brief.json when capture ended before review could begin."""
+    manifest = _load_capture_manifest(captures_dir)
+    if manifest is None or _manifest_is_reviewable(manifest):
+        return None
+    path = captures_dir / "agent-brief.json"
+    safeio_mod.atomic_write_text(
+        captures_dir,
+        path,
+        json.dumps(build_capture_failure_brief(manifest), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def _crop_components(captures_dir: Path, components: list[dict]) -> None:
     """Crop each component's bounding box out of its source screenshot."""
     try:
@@ -41,7 +214,7 @@ def _crop_components(captures_dir: Path, components: list[dict]) -> None:
         return  # crops are optional
 
     crops_dir = captures_dir / "components"
-    crops_dir.mkdir(parents=True, exist_ok=True)
+    safeio_mod.ensure_output_dir(captures_dir, crops_dir)
     captures_root = captures_dir.resolve()
 
     cache: dict[str, Any] = {}
@@ -86,7 +259,9 @@ def _crop_components(captures_dir: Path, components: list[dict]) -> None:
         crop_name = f"{c['viewport']}-{c['state']}-{c['component_kind']}-{c['index']}.png"
         crop_path = crops_dir / crop_name
         try:
-            crop.save(crop_path)
+            buffer = io.BytesIO()
+            crop.save(buffer, format="PNG")
+            safeio_mod.atomic_write_bytes(captures_dir, crop_path, buffer.getvalue())
             c["crop_path"] = str(crop_path.relative_to(captures_dir))
         except (OSError, ValueError):
             logger.warning(
@@ -209,7 +384,7 @@ def _annotate_overviews(
         return {}
 
     out_dir = captures_dir / "screens"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    safeio_mod.ensure_output_dir(captures_dir, out_dir)
     captures_root = captures_dir.resolve()
 
     annotated_paths: dict[str, str] = {}
@@ -369,7 +544,9 @@ def _annotate_overviews(
         out_name = Path(rel).stem + "-annotated.png"
         out_path = out_dir / out_name
         try:
-            img.save(out_path)
+            buffer = io.BytesIO()
+            img.save(buffer, format="PNG")
+            safeio_mod.atomic_write_bytes(captures_dir, out_path, buffer.getvalue())
             annotated_paths[stem] = str(out_path.relative_to(captures_dir))
         except (OSError, ValueError):
             logger.warning(
@@ -381,16 +558,173 @@ def _annotate_overviews(
     return annotated_paths
 
 
+def _analysis_integrity_report(
+    captures_dir: Path,
+    target_system: str | None,
+    evidence: artifacts_mod.CaptureEvidence,
+    exc: artifacts_mod.ArtifactIntegrityError,
+) -> dict[str, Any]:
+    requested = len(evidence.manifest["requested"]) if evidence.manifest is not None else 0
+    succeeded = len(evidence.dom_paths)
+    message = "Analysis artifacts failed integrity validation; no quality grade was issued."
+    result: dict[str, Any] = {
+        "version": __version__,
+        "target_system": target_system,
+        "review_status": {
+            "status": "incomplete",
+            "reviewable": False,
+            "message": message,
+        },
+        "coverage": {
+            "complete": False,
+            "provisional": True,
+            "reviewable": False,
+            "status": "incomplete",
+            "captures_requested": requested,
+            "captures_complete": succeeded,
+            "captures_succeeded": succeeded,
+            "capture_failures": 0,
+            "analysis_complete": False,
+            "manifest_present": evidence.manifest is not None,
+        },
+        "captures": [],
+        "annotated_overviews": {},
+        "annotations": {},
+        "grade": None,
+        "damage": None,
+        "score": {
+            "grade": "INCOMPLETE",
+            "grade_summary": message,
+            "score": None,
+            "counts": {},
+            "provisional": True,
+        },
+        "top_findings": [],
+        "global_findings": [],
+        "tokens": {},
+        "components": [],
+        "design_context": None,
+        "integrity_error": sanitize_untrusted_text(str(exc), max_len=300),
+    }
+    safeio_mod.atomic_write_text(
+        captures_dir,
+        captures_dir / "agent-brief.json",
+        json.dumps(build_agent_brief(result), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return result
+
+
 def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, Any]:
     """Assemble report.json from analysis files in captures_dir/analysis/."""
     captures_dir = Path(captures_dir)
+    manifest_at_start = _load_capture_manifest(captures_dir)
+    try:
+        evidence = artifacts_mod.capture_evidence(captures_dir)
+    except artifacts_mod.ArtifactIntegrityError as exc:
+        manifest_at_start = {
+            "requested": [],
+            "succeeded": [],
+            "failures": [
+                {
+                    "viewport": "unknown",
+                    "state": "unknown",
+                    "reason_code": exc.reason_code,
+                    "reason": "capture evidence failed integrity validation",
+                }
+            ],
+            "complete": False,
+            "reviewable": False,
+            "status": "failed",
+            "_manifest_present": artifacts_mod.capture_manifest_present(captures_dir),
+            "integrity_error": sanitize_untrusted_text(str(exc), max_len=300),
+        }
+        evidence = None
+    if (manifest_at_start is not None and not _manifest_is_reviewable(manifest_at_start)) or (
+        evidence is not None and not evidence.reviewable and not evidence.legacy
+    ):
+        if manifest_at_start is None and evidence is not None:
+            manifest_at_start = {
+                "requested": [],
+                "succeeded": [],
+                "failures": [],
+                "complete": False,
+                "reviewable": False,
+                "status": evidence.status,
+                "_manifest_present": False,
+            }
+        if manifest_at_start is None:  # Defensive invariant.
+            manifest_at_start = {
+                "requested": [],
+                "succeeded": [],
+                "failures": [],
+                "complete": False,
+                "reviewable": False,
+                "status": "failed",
+                "_manifest_present": False,
+            }
+        brief = build_capture_failure_brief(manifest_at_start)
+        safeio_mod.atomic_write_text(
+            captures_dir,
+            captures_dir / "agent-brief.json",
+            json.dumps(brief, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "version": __version__,
+            "target_system": target_system,
+            "review_status": brief["review_status"],
+            "coverage": brief["coverage"],
+            "captures": [],
+            "annotated_overviews": {},
+            "annotations": {},
+            "grade": None,
+            "damage": None,
+            "score": {
+                "grade": "INCOMPLETE",
+                "grade_summary": brief["grade_summary"],
+                "score": None,
+                "counts": {},
+                "provisional": True,
+            },
+            "top_findings": [],
+            "global_findings": [],
+            "tokens": {},
+            "components": [],
+            "design_context": None,
+        }
     components: list[dict] = []
     global_findings: list[dict] = []
     summaries: list[dict] = []
     captures_meta: list[dict] = []
+    if evidence is None:  # Defensive invariant; invalid evidence returned above.
+        raise RuntimeError("capture evidence state was lost during report composition")
+    analysis_paths = artifacts_mod.stage_paths(captures_dir, "analysis", evidence.dom_paths)
+    if evidence.legacy and not evidence.dom_paths:
+        analysis_paths = tuple(sorted((captures_dir / "analysis").glob("*.json")))
+    analysis_artifacts_complete = (
+        bool(evidence.dom_paths) and len(analysis_paths) == len(evidence.dom_paths)
+    ) or (evidence.legacy and not evidence.dom_paths)
 
-    for analysis_path in sorted((captures_dir / "analysis").glob("*.json")):
-        data = json.loads(analysis_path.read_text(encoding="utf-8"))
+    dom_documents: dict[str, dict[str, Any]] = {}
+    for dom_path in evidence.dom_paths:
+        try:
+            dom_documents[dom_path.name] = artifacts_mod.read_dom_document(dom_path)
+        except artifacts_mod.ArtifactIntegrityError as exc:
+            return _analysis_integrity_report(captures_dir, target_system, evidence, exc)
+
+    for analysis_path in analysis_paths:
+        try:
+            data = artifacts_mod.read_analysis_document(analysis_path)
+            matching_dom = dom_documents.get(analysis_path.name)
+            if matching_dom is not None:
+                artifacts_mod.validate_analysis_capture_binding(
+                    data,
+                    matching_dom,
+                    where=str(analysis_path.relative_to(captures_dir)),
+                )
+        except artifacts_mod.ArtifactIntegrityError as exc:
+            return _analysis_integrity_report(captures_dir, target_system, evidence, exc)
         for comp in data.get("components", []):
             # Defense-in-depth: even though decompose/analyze already
             # sanitize, the on-disk analysis file could have been authored
@@ -409,8 +743,8 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
             }
         )
 
-    for dom_path in sorted((captures_dir / "dom").glob("*.json")):
-        dom = json.loads(dom_path.read_text(encoding="utf-8"))
+    for dom_path in evidence.dom_paths:
+        dom = dom_documents[dom_path.name]
         meta = dom.get("meta", {})
         # Page title and URL are the most attacker-controlled fields in the
         # entire pipeline — a hostile page picks them freely. Sanitize before
@@ -459,12 +793,21 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
     annotations = _select_annotations(components, top)
     annotated = _annotate_overviews(captures_dir, annotations)
 
-    tokens_path = captures_dir / "tokens" / "extracted.json"
-    if not tokens_path.exists():
-        tokens_path = captures_dir / "tokens.json"  # legacy fallback
-        if tokens_path.exists():
-            logger.warning("using legacy tokens.json path; expected tokens dir")
-    tokens = json.loads(tokens_path.read_text(encoding="utf-8")) if tokens_path.exists() else {}
+    if evidence.manifest is not None:
+        # Recompute from the exact manifest-selected DOM. A cached token file
+        # may belong to an older run and is not evidence for this report.
+        tokens = tokens_mod.extract_from_captures(captures_dir) if evidence.dom_paths else {}
+    else:
+        # Legacy report-only directories have no manifest authority. Preserve
+        # their explicit token artifact for backwards-compatible inspection.
+        tokens_path = captures_dir / "tokens" / "extracted.json"
+        if not tokens_path.exists():
+            tokens_path = captures_dir / "tokens.json"
+        tokens = (
+            artifacts_mod.read_json_object(tokens_path)
+            if tokens_path.exists()
+            else tokens_mod.extract_from_captures(captures_dir)
+        )
 
     dom_coverage_complete = bool(captures_meta) and all(
         bool((capture.get("coverage") or {}).get("complete", True)) for capture in captures_meta
@@ -473,26 +816,34 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
     succeeded_count = len(captures_meta)
     manifest_complete: bool | None = None
     manifest_failures = 0
-    manifest_path = captures_dir / "capture-manifest.json"
-    if manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            requested = manifest.get("requested") if isinstance(manifest, dict) else None
-            succeeded = manifest.get("succeeded") if isinstance(manifest, dict) else None
-            failures = manifest.get("failures") if isinstance(manifest, dict) else None
-            if not isinstance(requested, list) or not isinstance(succeeded, list):
-                raise ValueError("capture manifest requested/succeeded must be lists")
-            if not isinstance(failures, list):
-                failures = []
-            requested_count = len(requested)
-            succeeded_count = len(succeeded)
-            manifest_failures = len(failures)
-            manifest_complete = bool(manifest.get("complete"))
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            logger.warning("capture manifest is unreadable; coverage is provisional", exc_info=True)
-            manifest_complete = False
+    manifest_reviewable: bool | None = None
+    manifest_status: str | None = None
+    manifest = evidence.manifest
+    if manifest is not None:
+        requested_count = len(manifest["requested"])
+        succeeded_count = len(manifest["succeeded"])
+        manifest_failures = len(manifest["failures"])
+        manifest_complete = bool(manifest["complete"])
+        manifest_reviewable = bool(manifest["reviewable"])
+        manifest_status = str(manifest["status"])
 
-    coverage_complete = dom_coverage_complete
+    empty_surface = any(
+        (capture.get("coverage") or {}).get("reason") == "empty-surface"
+        for capture in captures_meta
+    )
+    no_analyzable_content = (
+        bool(captures_meta)
+        and analysis_artifacts_complete
+        and not components
+        and not global_findings
+    )
+    unscorable_surface = empty_surface or no_analyzable_content
+    if no_analyzable_content and not empty_surface:
+        for capture in captures_meta:
+            capture["manual_review_needed"] = True
+    coverage_complete = (
+        dom_coverage_complete and analysis_artifacts_complete and not unscorable_surface
+    )
     if manifest_complete is not None:
         coverage_complete = (
             coverage_complete
@@ -512,14 +863,54 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
         ),
         "captures_succeeded": succeeded_count,
         "capture_failures": manifest_failures,
+        "analysis_complete": analysis_artifacts_complete,
         "manifest_present": manifest_complete is not None,
         "provisional": not coverage_complete,
+        "reviewable": (
+            bool(captures_meta) and manifest_reviewable is not False and not empty_surface
+        ),
+        "reason": (
+            "empty-surface"
+            if empty_surface
+            else "no-analyzable-content"
+            if no_analyzable_content
+            else None
+        ),
+        "status": (
+            "complete"
+            if coverage_complete
+            else "failed"
+            if not captures_meta
+            else "incomplete"
+            if empty_surface
+            else "provisional"
+            if no_analyzable_content
+            else manifest_status
+            if manifest_status in {"blocked", "failed"}
+            else "provisional"
+        ),
     }
-    if not captures_meta:
+    if not captures_meta or not analysis_artifacts_complete:
         scoring = {
             **scoring,
             "grade": "INCOMPLETE",
-            "grade_summary": "No captures were available; no quality grade was issued.",
+            "grade_summary": (
+                "No captures were available; no quality grade was issued."
+                if not captures_meta
+                else "Analysis artifacts are incomplete; no quality grade was issued."
+            ),
+            "score": None,
+            "provisional": True,
+        }
+    elif unscorable_surface:
+        scoring = {
+            **scoring,
+            "grade": "INCOMPLETE",
+            "grade_summary": (
+                "The captured page exposed no visible review surface; no quality grade was issued."
+                if empty_surface
+                else "Analysis found no reviewable interface content; no quality grade was issued."
+            ),
             "score": None,
             "provisional": True,
         }
@@ -551,9 +942,51 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
                 "errors": [sanitize_untrusted_text(str(exc), max_len=500)],
             }
 
+    if not captures_meta:
+        review_status = {
+            "status": "failed",
+            "reviewable": False,
+            "message": "No reviewable surface was captured, so no design conclusion can be issued.",
+        }
+    elif not analysis_artifacts_complete:
+        review_status = {
+            "status": "incomplete",
+            "reviewable": False,
+            "message": "The surface was captured, but its analysis artifacts are incomplete.",
+        }
+    elif unscorable_surface:
+        if empty_surface:
+            review_status = {
+                "status": "incomplete",
+                "reviewable": False,
+                "message": (
+                    "The page exposed no visible review surface; "
+                    "verify that the app rendered before review."
+                ),
+            }
+        else:
+            review_status = {
+                "status": "provisional",
+                "reviewable": True,
+                "message": (
+                    "The screenshot is available for manual visual review, "
+                    "but the DOM produced no analyzable components."
+                ),
+            }
+    else:
+        review_status = {
+            "status": "ready" if coverage_complete else "provisional",
+            "reviewable": True,
+            "message": (
+                "The requested surface was captured and is ready for evidence-led review."
+                if coverage_complete
+                else "The surface was captured with incomplete coverage; conclusions must remain provisional."
+            ),
+        }
     result = {
         "version": __version__,
         "target_system": target_system,
+        "review_status": review_status,
         "coverage": coverage,
         "captures": captures_meta,
         "annotated_overviews": annotated,
@@ -571,8 +1004,11 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
     # Emit a compact, agent-first index. The full report remains available for
     # lazy evidence lookup, but agents should not ingest every computed style.
     brief = build_agent_brief(result)
-    (captures_dir / "agent-brief.json").write_text(
-        json.dumps(brief, indent=2) + "\n", encoding="utf-8"
+    safeio_mod.atomic_write_text(
+        captures_dir,
+        captures_dir / "agent-brief.json",
+        json.dumps(brief, indent=2) + "\n",
+        encoding="utf-8",
     )
 
     # Emit an HTML report alongside the JSON/markdown output. Link local image
@@ -687,6 +1123,13 @@ def build_agent_brief(report: dict[str, Any]) -> dict[str, Any]:
         "version": report.get("version"),
         "target_system": report.get("target_system"),
         "design_context": report.get("design_context"),
+        "review_status": report.get("review_status")
+        or {
+            "status": "ready"
+            if bool((report.get("coverage") or {}).get("complete"))
+            else "provisional",
+            "reviewable": True,
+        },
         "coverage": report.get("coverage"),
         "grade": score.get("grade"),
         "damage": score.get("score"),

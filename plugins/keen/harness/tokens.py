@@ -11,13 +11,15 @@ Two input modes:
 from __future__ import annotations
 
 import contextlib
-import json
+import io
 import logging
 import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from harness import _artifacts as artifacts_mod
+from harness import _safeio as safeio_mod
 from harness._sanitize import sanitize_untrusted_text
 from harness.colors import parse_color
 
@@ -64,6 +66,7 @@ def _iter_dom_files(captures_dir: Path):
 def extract_from_captures(captures_dir: Path) -> dict[str, Any]:
     """Walk every dom-*.json under captures_dir and aggregate token usage."""
     captures_dir = Path(captures_dir)
+    evidence = artifacts_mod.capture_evidence(captures_dir)
     colors: Counter[str] = Counter()
     bg_colors: Counter[str] = Counter()
     font_sizes: Counter[float] = Counter()
@@ -74,11 +77,22 @@ def extract_from_captures(captures_dir: Path) -> dict[str, Any]:
     text_samples: Counter[tuple[str, str, float, int, str]] = Counter()
 
     n_elements = 0
-    for dom_path in _iter_dom_files(captures_dir):
-        data = json.loads(dom_path.read_text(encoding="utf-8"))
+    for dom_path in evidence.dom_paths:
+        data = artifacts_mod.read_dom_document(dom_path)
         for el in data.get("elements", []):
-            n_elements += 1
             s = el.get("styles", {})
+            if s.get("display") == "none" or str(s.get("visibility") or "").lower() in {
+                "hidden",
+                "collapse",
+            }:
+                continue
+            try:
+                effective_opacity = float(el.get("effectiveOpacity", s.get("opacity", "1")))
+            except (TypeError, ValueError):
+                effective_opacity = 1.0
+            if effective_opacity <= 0:
+                continue
+            n_elements += 1
             if s.get("color"):
                 colors[s["color"]] += 1
             if s.get("backgroundColor"):
@@ -385,7 +399,12 @@ def render_drift(drift: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def write_palette(detected: dict[str, Any], path: Path) -> None:
+def write_palette(
+    detected: dict[str, Any],
+    path: Path,
+    *,
+    output_root: Path | None = None,
+) -> None:
     """Render a palette PNG. No-op if Pillow isn't available."""
     try:
         from PIL import Image, ImageDraw
@@ -418,5 +437,6 @@ def write_palette(detected: dict[str, Any], path: Path) -> None:
                 exc_info=True,
             )
             continue
-    path.parent.mkdir(parents=True, exist_ok=True)
-    img.save(path)
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    safeio_mod.atomic_write_bytes(output_root or path.parent, path, buffer.getvalue())

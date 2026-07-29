@@ -11,7 +11,7 @@
       "name": "keen",
       "source": "./plugins/keen",
       "description": "Choose a visual direction, improve real pages, and keep the product consistent. Includes private local workshops and browser-based review. Requires the local Keen CLI and Chromium runtime described in the README.",
-      "version": "0.8.0",
+      "version": "0.8.1",
       "author": {
         "name": "Keen"
       },

@@ -21,7 +21,7 @@ EXPECTED_SKILLS = {
     "refine",
 }
 EXPECTED_REFS = {"design-direction.md", "explore.md", "guard.md", "refine.md", "workshop.md"}
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 
 
 def words(text: str) -> int:

@@ -116,7 +116,7 @@ same direction. Temporary screenshots and reports can stay untracked.
 Keen can review a running page at mobile and desktop sizes:
 
 ```bash
-keen review "http://localhost:3000" --viewports mobile,desktop
+keen review "http://localhost:3000" --allow-internal --viewports mobile,desktop
 ```
 
 The review includes a readable HTML report, screenshots, and structured
@@ -132,7 +132,7 @@ presented as a score for whether a design is beautiful.
 
 ```bash
 keen doctor
-keen capture "http://localhost:3000" --viewports mobile,desktop
+keen capture "http://localhost:3000" --allow-internal --viewports mobile,desktop
 keen audit ".keen/review/<run>"
 keen tokens ".keen/review/<run>"
 keen diff ".keen/review/<baseline>" ".keen/review/<current>"
@@ -145,6 +145,8 @@ keen diff ".keen/review/<baseline>" ".keen/review/<current>"
 - Keen only builds or fixes something when you ask it to.
 - Local project artifacts stay inside the project.
 - The local tool has no telemetry or model SDK.
+- Internal and file review permissions are scoped to explicitly named origins
+  and documents; add a separate development API with `--allow-origin`.
 
 See the [security policy](SECURITY.md) for private vulnerability reporting and
 guidance on protecting local review data.

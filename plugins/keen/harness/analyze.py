@@ -19,7 +19,6 @@ sampling predicates; without it those checks no-op.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import re
@@ -29,6 +28,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from harness import _artifacts as artifacts_mod
 from harness._sanitize import sanitize_finding
 from harness.colors import (
     contrast_ratio,
@@ -55,7 +55,7 @@ def _resolve_background_dom(comp: dict, all_comps: list[dict]) -> str:
         if parent_idx < 0:
             break
         cur = next((c for c in all_comps if c.get("index") == parent_idx), None)
-    document_background = comp.get("document_background")
+    document_background = comp.get("document_background", "rgb(255, 255, 255)")
     if isinstance(document_background, str) and parse_color(document_background):
         return document_background
     return "rgb(255, 255, 255)"
@@ -70,6 +70,31 @@ def _resolve_background(comp: dict, ctx: dict) -> str:
         if sampled is not None:
             return sampled
     return _resolve_background_dom(comp, ctx["all_comps"])
+
+
+def _resolve_adjacent_background_dom(comp: dict, all_comps: list[dict]) -> str | None:
+    """Resolve the surface outside a control, excluding the control's fill."""
+    by_index = {item.get("index"): item for item in all_comps if isinstance(item.get("index"), int)}
+    parent_index = comp.get("parent_index", -1)
+    seen: set[int] = set()
+    while isinstance(parent_index, int) and parent_index >= 0 and parent_index not in seen:
+        seen.add(parent_index)
+        parent = by_index.get(parent_index)
+        if parent is None:
+            break
+        styles = parent.get("styles", {})
+        background_image = str(styles.get("backgroundImage") or "").strip().lower()
+        if background_image and background_image != "none":
+            return None
+        background = styles.get("backgroundColor", "")
+        parsed = parse_color(background)
+        if parsed and parsed[3] > 0.01:
+            return background
+        parent_index = parent.get("parent_index", -1)
+    document_background = comp.get("document_background", "rgb(255, 255, 255)")
+    if isinstance(document_background, str) and parse_color(document_background):
+        return document_background
+    return None
 
 
 # -- Findings model --------------------------------------------------------
@@ -158,6 +183,34 @@ def _font_weight(comp: dict) -> int:
         return int(float(fw))
     except (ValueError, TypeError):
         return 400
+
+
+def _css_opacity(styles: dict) -> float | None:
+    """Return a finite computed opacity value, or None when it is unusable."""
+    try:
+        opacity = float(styles.get("opacity", "1"))
+    except (TypeError, ValueError):
+        return None
+    return opacity if math.isfinite(opacity) else None
+
+
+def _css_px(value: Any) -> float | None:
+    """Parse a computed CSS pixel length.
+
+    Browsers expose border widths as pixel values in computed styles, even
+    when the author used keywords such as ``thin``. Other units are left
+    unmeasured rather than guessed.
+    """
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+    elif isinstance(value, str):
+        match = re.fullmatch(r"\s*(-?(?:\d+(?:\.\d*)?|\.\d+))px\s*", value)
+        if match is None:
+            return None
+        parsed = float(match.group(1))
+    else:
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _is_large_text(comp: dict, ctx: dict) -> bool:
@@ -789,19 +842,67 @@ def _visual_dom_bg(comp: dict, ctx: dict) -> Finding | None:
     """Compare declared background to the pixel actually rendered at the center.
 
     Catches z-index covers, broken background-image fallbacks, gradient overlays
-    that the styles-only check misses.
+    that the styles-only check misses. This comparison is only valid when the
+    element and its declared background are opaque; translucent values are
+    expected to differ after browser compositing.
     """
     sampler = ctx.get("pixel_sampler")
     if sampler is None:
         return None
-    declared = comp.get("styles", {}).get("backgroundColor", "")
+    styles = comp.get("styles", {})
+    opacity = _css_opacity(styles)
+    effective_opacity = comp.get("effective_opacity")
+    effective_opacity_value: float | None
+    if isinstance(effective_opacity, (int, float, str)):
+        try:
+            effective_opacity_value = float(effective_opacity)
+        except ValueError:
+            effective_opacity_value = None
+    else:
+        effective_opacity_value = None
+    if effective_opacity_value is None:
+        effective_opacity_value = opacity
+        current: dict[Any, Any] | None = comp
+        seen: set[int] = set()
+        by_index = {
+            item.get("index"): item
+            for item in ctx.get("all_comps", [])
+            if isinstance(item.get("index"), int)
+        }
+        while effective_opacity_value is not None:
+            if current is None:
+                break
+            parent_index = current.get("parent_index", -1)
+            if not isinstance(parent_index, int) or parent_index < 0 or parent_index in seen:
+                break
+            seen.add(parent_index)
+            current = by_index.get(parent_index)
+            if current is None:
+                break
+            parent_opacity = _css_opacity(current.get("styles", {}))
+            if parent_opacity is None:
+                break
+            effective_opacity_value *= parent_opacity
+    if (
+        opacity is None
+        or opacity < 1
+        or effective_opacity_value is None
+        or effective_opacity_value < 1
+    ):
+        return None
+    background_image = str(styles.get("backgroundImage") or "").strip().lower()
+    if background_image and background_image != "none":
+        return None
+    declared = styles.get("backgroundColor", "")
     declared_p = parse_color(declared)
     sampled = sampler(comp)
     sampled_p = parse_color(sampled) if sampled else None
     if not declared_p or not sampled_p:
         return None
-    # If declared is transparent we have nothing to compare.
-    if declared_p[3] < 0.05:
+    # A translucent background is composited with the backdrop before it
+    # reaches the screenshot, so comparing it to the literal CSS color would
+    # produce an expected mismatch.
+    if declared_p[3] < 1:
         return None
     delta = sum(abs(declared_p[i] * 255 - sampled_p[i] * 255) for i in range(3))
     threshold = ctx["thresholds"]["visual_dom_color_delta"]
@@ -906,32 +1007,68 @@ def _non_text_contrast(comp: dict, ctx: dict) -> Finding | None:
     if comp.get("disabled") or comp.get("aria_disabled"):
         return None
     styles = comp.get("styles", {})
-    # Pick the strongest visible border: any side with a non-zero width
-    # and a non-transparent color counts. If `borderColor` is set as a
-    # shorthand we still see it via the per-side properties.
-    border_color = (
-        styles.get("borderTopColor")
-        or styles.get("borderColor")
-        or styles.get("borderRightColor")
-        or styles.get("borderBottomColor")
-        or styles.get("borderLeftColor")
-        or ""
+    border_sides = (
+        ("top", "borderTopWidth", "borderTopColor"),
+        ("right", "borderRightWidth", "borderRightColor"),
+        ("bottom", "borderBottomWidth", "borderBottomColor"),
+        ("left", "borderLeftWidth", "borderLeftColor"),
     )
-    # If no border declared we can't measure non-text contrast for this
-    # input via CSS alone; skip rather than guess.
-    if not border_color:
+
+    # Real captures include all four computed widths. Only rendered sides are
+    # evidence: browsers retain a border color even when border-width is 0px.
+    has_width_evidence = any(width_key in styles for _, width_key, _ in border_sides)
+    candidates: list[tuple[str, str, float | None]] = []
+    if has_width_evidence:
+        for side, width_key, color_key in border_sides:
+            width = _css_px(styles.get(width_key))
+            color = styles.get(color_key, "")
+            parsed = parse_color(color)
+            if width is not None and width > 0 and parsed is not None and parsed[3] >= 0.05:
+                candidates.append((side, color, width))
+    else:
+        # Backward compatibility for older/synthetic artifacts that predate
+        # captured border widths.
+        color = (
+            styles.get("borderTopColor")
+            or styles.get("borderColor")
+            or styles.get("borderRightColor")
+            or styles.get("borderBottomColor")
+            or styles.get("borderLeftColor")
+            or ""
+        )
+        parsed = parse_color(color)
+        if parsed is not None and parsed[3] >= 0.05:
+            candidates.append(("unknown", color, None))
+
+    if not candidates:
         return None
-    parsed = parse_color(border_color)
-    if parsed is None or parsed[3] < 0.05:
-        # Fully transparent border — nothing to evaluate.
+    outside_sampler = ctx.get("outside_pixel_sampler")
+    bg = outside_sampler(comp) if outside_sampler is not None else None
+    if bg is None:
+        bg = _resolve_adjacent_background_dom(comp, ctx["all_comps"])
+    if bg is None:
         return None
-    bg = _resolve_background(comp, ctx)
-    ratio = contrast_ratio(border_color, bg)
-    if ratio is None:
+    measured_candidates = [
+        (side, color, width, ratio)
+        for side, color, width in candidates
+        if (ratio := contrast_ratio(color, bg)) is not None
+    ]
+    if not measured_candidates:
         return None
+    border_side, border_color, border_width, ratio = max(
+        measured_candidates, key=lambda candidate: candidate[3]
+    )
     needed = ctx["thresholds"]["contrast_nontext_aa"]
     if ratio >= needed:
         return None
+    measured: dict[str, Any] = {
+        "border": border_color,
+        "border_side": border_side,
+        "background": bg,
+        "ratio": round(ratio, 2),
+    }
+    if border_width is not None:
+        measured["border_width"] = border_width
     return Finding(
         predicate_id="contrast.non-text",
         severity="P1",
@@ -940,7 +1077,7 @@ def _non_text_contrast(comp: dict, ctx: dict) -> Finding | None:
             f"Input border contrast is {ratio:.2f}:1 against the resolved background; "
             f"users with low vision may not see the control's boundary."
         ),
-        measured={"border": border_color, "background": bg, "ratio": round(ratio, 2)},
+        measured=measured,
         expected={"ratio": needed},
     )
 
@@ -1281,7 +1418,7 @@ def _required_visible_indicator(comp: dict, ctx: dict) -> Finding | None:
 # -- Pixel sampler --------------------------------------------------------
 
 
-def _build_pixel_sampler(captures_dir: Path):
+def _build_pixel_sampler(captures_dir: Path, *, outside: bool = False):
     """Return a callable comp -> 'rgb(r,g,b)' string by sampling the screenshot.
 
     Returns None if Pillow isn't installed (so callers can skip pixel-aware
@@ -1337,21 +1474,34 @@ def _build_pixel_sampler(captures_dir: Path):
         y0 = b["y"] * scale
         w = b["w"] * scale
         h = b["h"] * scale
-        # 9 sample offsets: insets by 15% so we stay inside the box but avoid
-        # the very edges where antialiasing happens.
-        inset_x = w * 0.15
-        inset_y = h * 0.15
-        offsets = [
-            (inset_x, inset_y),  # top-left
-            (w / 2, inset_y),  # top-mid
-            (w - inset_x, inset_y),  # top-right
-            (inset_x, h / 2),  # mid-left
-            (w / 2, h / 2),  # center
-            (w - inset_x, h / 2),  # mid-right
-            (inset_x, h - inset_y),  # bottom-left
-            (w / 2, h - inset_y),  # bottom-mid
-            (w - inset_x, h - inset_y),  # bottom-right
-        ]
+        if outside:
+            pad = max(2.0, 2.0 * scale)
+            offsets = [
+                (-pad, -pad),
+                (w / 2, -pad),
+                (w + pad, -pad),
+                (-pad, h / 2),
+                (w + pad, h / 2),
+                (-pad, h + pad),
+                (w / 2, h + pad),
+                (w + pad, h + pad),
+            ]
+        else:
+            # 9 inset samples stay inside the component while avoiding its
+            # antialiased edge.
+            inset_x = w * 0.15
+            inset_y = h * 0.15
+            offsets = [
+                (inset_x, inset_y),
+                (w / 2, inset_y),
+                (w - inset_x, inset_y),
+                (inset_x, h / 2),
+                (w / 2, h / 2),
+                (w - inset_x, h / 2),
+                (inset_x, h - inset_y),
+                (w / 2, h - inset_y),
+                (w - inset_x, h - inset_y),
+            ]
         from collections import Counter
 
         votes: Counter = Counter()
@@ -1380,7 +1530,7 @@ def _build_pixel_sampler(captures_dir: Path):
         # "background". When another candidate exists, exclude pixels close
         # to the computed foreground before selecting the mode.
         foreground = parse_color(comp.get("styles", {}).get("color", ""))
-        if foreground is not None:
+        if not outside and foreground is not None:
             fg_rgb = tuple(round(channel * 255) for channel in foreground[:3])
             background_votes: Counter = Counter(
                 {
@@ -1405,6 +1555,7 @@ def analyze_components(
     target_system: str | None = None,
     pixel_sampler: Callable[[dict], str | None] | None = None,
     focus_coverage: dict | None = None,
+    outside_pixel_sampler: Callable[[dict], str | None] | None = None,
 ) -> dict[str, Any]:
     """Run all applicable predicates against every component."""
     thresholds = _thresholds_for(target_system)
@@ -1413,6 +1564,7 @@ def analyze_components(
         "target_system": target_system,
         "all_comps": components,
         "pixel_sampler": pixel_sampler,
+        "outside_pixel_sampler": outside_pixel_sampler,
         "focus_coverage": focus_coverage or {},
     }
 
@@ -1511,11 +1663,13 @@ def analyze_file(
     If `captures_dir` is provided, builds a pixel sampler so pixel-aware
     predicates can run against the screenshots.
     """
-    components = json.loads(components_path.read_text(encoding="utf-8"))
+    components = artifacts_mod.read_component_list(components_path)
     sampler = _build_pixel_sampler(captures_dir) if captures_dir else None
+    outside_sampler = _build_pixel_sampler(captures_dir, outside=True) if captures_dir else None
     return analyze_components(
         components,
         target_system=target_system,
         pixel_sampler=sampler,
+        outside_pixel_sampler=outside_sampler,
         focus_coverage=focus_coverage,
     )

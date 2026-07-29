@@ -10,7 +10,13 @@ import json
 from pathlib import Path
 
 from harness.design_context import new_context
-from harness.report import _select_annotations, build_agent_brief, compose, render_summary
+from harness.report import (
+    _select_annotations,
+    build_agent_brief,
+    build_capture_failure_brief,
+    compose,
+    render_summary,
+)
 
 
 def test_annotation_selection_is_prioritized_grouped_and_bounded() -> None:
@@ -191,6 +197,8 @@ def _setup_compose_inputs(captures_dir: Path) -> None:
     """Create the minimum on-disk layout that compose() expects."""
     (captures_dir / "analysis").mkdir(parents=True, exist_ok=True)
     (captures_dir / "dom").mkdir(parents=True, exist_ok=True)
+    (captures_dir / "screens").mkdir(parents=True, exist_ok=True)
+    (captures_dir / "screens" / "desktop-default.png").write_bytes(b"fixture")
     (captures_dir / "analysis" / "desktop-default.json").write_text(
         json.dumps(
             {
@@ -201,6 +209,7 @@ def _setup_compose_inputs(captures_dir: Path) -> None:
                         "name": "Submit",
                         "viewport": "desktop",
                         "state": "default",
+                        "capture_path": "screens/desktop-default.png",
                         "box": {"x": 0, "y": 0, "w": 100, "h": 40},
                         "styles": {},
                         "findings": [
@@ -237,7 +246,7 @@ def _setup_compose_inputs(captures_dir: Path) -> None:
 def test_compose_assembles_report(tmp_path: Path) -> None:
     _setup_compose_inputs(tmp_path)
     report = compose(tmp_path, target_system="material-3")
-    assert report["version"] == "0.8.0"
+    assert report["version"] == "0.8.1"
     assert report["target_system"] == "material-3"
     assert len(report["captures"]) == 1
     assert report["captures"][0]["title"] == "Test Page"
@@ -274,6 +283,76 @@ def test_compose_with_no_inputs_returns_empty(tmp_path: Path) -> None:
     assert report["score"]["grade"] == "INCOMPLETE"
     assert report["score"]["score"] is None
     assert report["coverage"]["provisional"] is True
+    assert report["review_status"]["reviewable"] is False
+
+
+def test_visible_canvas_without_components_allows_manual_visual_review(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "analysis").mkdir()
+    (tmp_path / "dom").mkdir()
+    (tmp_path / "screens").mkdir()
+    (tmp_path / "screens" / "canvas.png").write_bytes(b"fixture")
+    (tmp_path / "analysis" / "canvas.json").write_text(
+        json.dumps(
+            {
+                "components": [],
+                "global_findings": [],
+                "summary": {},
+            }
+        )
+    )
+    (tmp_path / "dom" / "canvas.json").write_text(
+        json.dumps(
+            {
+                "title": "Canvas",
+                "url": "https://example.com/canvas",
+                "meta": {
+                    "viewport": "desktop",
+                    "state": "default",
+                    "screen_path": "screens/canvas.png",
+                },
+                "coverage": {"complete": True, "reason": None},
+                "elements": [
+                    {
+                        "index": 0,
+                        "tag": "canvas",
+                        "styles": {},
+                        "box": {"x": 0, "y": 0, "w": 800, "h": 600},
+                    }
+                ],
+            }
+        )
+    )
+    (tmp_path / "capture-manifest.json").write_text(
+        json.dumps(
+            {
+                "requested": [{"viewport": "desktop", "state": "default"}],
+                "succeeded": [
+                    {
+                        "viewport": "desktop",
+                        "state": "default",
+                        "screen": "screens/canvas.png",
+                        "dom": "dom/canvas.json",
+                    }
+                ],
+                "failures": [],
+                "complete": True,
+                "reviewable": True,
+                "status": "complete",
+            }
+        )
+    )
+
+    report = compose(tmp_path)
+
+    assert report["score"]["grade"] == "INCOMPLETE"
+    assert report["score"]["score"] is None
+    assert report["coverage"]["reason"] == "no-analyzable-content"
+    assert report["coverage"]["reviewable"] is True
+    assert report["review_status"]["status"] == "provisional"
+    assert report["review_status"]["reviewable"] is True
+    assert report["captures"][0]["manual_review_needed"] is True
 
 
 def test_compose_scores_and_surfaces_global_findings(tmp_path: Path) -> None:
@@ -428,7 +507,7 @@ def test_compose_surfaces_truncated_capture_as_provisional(tmp_path: Path) -> No
 
 def test_agent_brief_stays_bounded_for_large_component_inventory() -> None:
     report = {
-        "version": "0.8.0",
+        "version": "0.8.1",
         "coverage": {"complete": True, "provisional": False},
         "score": {"grade": "B", "score": 10, "counts": {"P1": 2}},
         "captures": [],
@@ -550,3 +629,99 @@ def test_capture_manifest_is_authoritative_for_report_coverage(tmp_path: Path) -
     assert report["coverage"]["captures_succeeded"] == 1
     assert report["coverage"]["capture_failures"] == 1
     assert report["coverage"]["provisional"] is True
+
+
+def test_blocked_capture_brief_forbids_analysis_and_exposes_diagnostics() -> None:
+    brief = build_capture_failure_brief(
+        {
+            "requested": [{"viewport": "desktop", "state": "default"}],
+            "succeeded": [],
+            "failures": [
+                {
+                    "viewport": "desktop",
+                    "state": "default",
+                    "reason_code": "unexpected-url",
+                    "reason": "CaptureBlocked: expected /poc; observed /sign-in",
+                    "screen": "screens/poc-desktop-default.png",
+                    "dom": "dom/poc-desktop-default.json",
+                    "diagnostic_only": True,
+                }
+            ],
+            "reviewable": False,
+            "status": "blocked",
+        }
+    )
+
+    assert brief["review_status"]["status"] == "blocked"
+    assert brief["review_status"]["reviewable"] is False
+    assert brief["grade"] is None
+    assert brief["top_findings"] == []
+    assert brief["diagnostics"][0]["diagnostic_only"] is True
+    assert "Do not critique" in brief["decision_contract"]["requirements"][0]
+
+
+def test_compose_never_scores_blocked_capture_even_with_stale_analysis(tmp_path: Path) -> None:
+    (tmp_path / "analysis").mkdir()
+    (tmp_path / "dom").mkdir()
+    (tmp_path / "screens").mkdir()
+    (tmp_path / "screens" / "diagnostic.png").write_bytes(b"diagnostic")
+    (tmp_path / "dom" / "diagnostic.json").write_text(
+        json.dumps(
+            {
+                "meta": {
+                    "screen_path": "screens/diagnostic.png",
+                    "viewport": "desktop",
+                    "state": "default",
+                },
+                "coverage": {
+                    "expectation": {
+                        "status": "blocked",
+                        "reason_code": "unexpected-url",
+                    }
+                },
+            }
+        )
+    )
+    (tmp_path / "analysis" / "stale.json").write_text(
+        json.dumps(
+            {
+                "components": [
+                    {
+                        "component_kind": "button",
+                        "findings": [{"predicate_id": "stale", "severity": "P0"}],
+                    }
+                ],
+                "global_findings": [],
+            }
+        )
+    )
+    (tmp_path / "capture-manifest.json").write_text(
+        json.dumps(
+            {
+                "requested": [{"viewport": "desktop", "state": "default"}],
+                "succeeded": [],
+                "failures": [
+                    {
+                        "viewport": "desktop",
+                        "state": "default",
+                        "reason_code": "unexpected-url",
+                        "reason": "redirected",
+                        "screen": "screens/diagnostic.png",
+                        "dom": "dom/diagnostic.json",
+                        "diagnostic_only": True,
+                    }
+                ],
+                "complete": False,
+                "reviewable": False,
+                "status": "blocked",
+            }
+        )
+    )
+
+    report = compose(tmp_path)
+
+    assert report["score"]["grade"] == "INCOMPLETE"
+    assert report["score"]["score"] is None
+    assert report["components"] == []
+    assert report["top_findings"] == []
+    assert report["review_status"]["status"] == "blocked"

@@ -1,6 +1,6 @@
 {
   "name": "keen",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Keen helps coding agents choose a visual direction, improve real pages, and keep a product's design consistent. Requires the local Keen CLI and Playwright Chromium runtime described in the README.",
   "license": "MIT",
   "author": {

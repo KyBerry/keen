@@ -38,6 +38,7 @@ def _comp(**overrides) -> dict:
         "viewport_width": 1280,
         "viewport": "desktop",
         "state": "default",
+        "capture_path": "screens/desktop-default.png",
     }
     base.update(overrides)
     return base
@@ -274,6 +275,14 @@ def test_analyze_file_round_trip(tmp_path: Path) -> None:
     assert out["summary"]["total_components"] == 1
 
 
+def test_analyze_components_preserves_0_8_positional_focus_coverage() -> None:
+    coverage = {"observed": 3, "eligible": 4}
+
+    out = analyze_components([], None, None, coverage)
+
+    assert out["summary"]["focus_coverage"] == coverage
+
+
 def test_unattached_global_finding_is_preserved() -> None:
     """Page-wide findings must survive even when no component owns them."""
     out = analyze_components([_comp()], focus_coverage={})
@@ -360,6 +369,99 @@ def test_analyze_file_with_captures_dir_builds_pixel_sampler(tmp_path: Path) -> 
     out = analyze_file(comps_path, captures_dir=tmp_path)
     pids = {f["predicate_id"] for c in out["components"] for f in c.get("findings", [])}
     assert "visual-dom.background-mismatch" in pids
+
+
+def test_visual_dom_skips_intentionally_translucent_disabled_control() -> None:
+    comp = _comp(
+        component_kind="button",
+        disabled=True,
+        styles={
+            "backgroundColor": "rgb(20, 80, 200)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "16px",
+            "fontWeight": "400",
+            "opacity": "0.5",
+        },
+    )
+
+    analyze_components([comp], pixel_sampler=lambda _comp: "rgb(138, 168, 228)")
+
+    pids = {f["predicate_id"] for f in comp.get("findings", [])}
+    assert "visual-dom.background-mismatch" not in pids
+
+
+def test_visual_dom_skips_translucent_declared_background() -> None:
+    comp = _comp(
+        component_kind="button",
+        styles={
+            "backgroundColor": "rgba(20, 80, 200, 0.5)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "16px",
+            "fontWeight": "400",
+            "opacity": "1",
+        },
+    )
+
+    analyze_components([comp], pixel_sampler=lambda _comp: "rgb(138, 168, 228)")
+
+    pids = {f["predicate_id"] for f in comp.get("findings", [])}
+    assert "visual-dom.background-mismatch" not in pids
+
+
+def test_visual_dom_still_checks_opaque_disabled_control() -> None:
+    comp = _comp(
+        component_kind="button",
+        disabled=True,
+        styles={
+            "backgroundColor": "rgb(255, 255, 255)",
+            "color": "rgb(0, 0, 0)",
+            "fontSize": "16px",
+            "fontWeight": "400",
+            "opacity": "1",
+        },
+    )
+
+    analyze_components([comp], pixel_sampler=lambda _comp: "rgb(255, 0, 0)")
+
+    pids = {f["predicate_id"] for f in comp.get("findings", [])}
+    assert "visual-dom.background-mismatch" in pids
+
+
+def test_visual_dom_skips_effective_ancestor_opacity() -> None:
+    comp = _comp(
+        component_kind="button",
+        effective_opacity=0.5,
+        styles={
+            "backgroundColor": "rgb(20, 80, 200)",
+            "backgroundImage": "none",
+            "color": "white",
+            "fontSize": "16px",
+            "fontWeight": "400",
+            "opacity": "1",
+        },
+    )
+    analyze_components([comp], pixel_sampler=lambda _comp: "rgb(138, 168, 228)")
+    assert "visual-dom.background-mismatch" not in {
+        finding["predicate_id"] for finding in comp.get("findings", [])
+    }
+
+
+def test_visual_dom_skips_intentional_gradient() -> None:
+    comp = _comp(
+        component_kind="button",
+        styles={
+            "backgroundColor": "rgb(20, 80, 200)",
+            "backgroundImage": "linear-gradient(90deg, red, blue)",
+            "color": "white",
+            "fontSize": "16px",
+            "fontWeight": "400",
+            "opacity": "1",
+        },
+    )
+    analyze_components([comp], pixel_sampler=lambda _comp: "rgb(255, 0, 0)")
+    assert "visual-dom.background-mismatch" not in {
+        finding["predicate_id"] for finding in comp.get("findings", [])
+    }
 
 
 def test_pixel_sampler_does_not_choose_foreground_on_a_tie(tmp_path: Path) -> None:

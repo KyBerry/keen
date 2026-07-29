@@ -11,12 +11,13 @@ Output is deterministic given the same DOM dump.
 
 from __future__ import annotations
 
-import json
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from harness._sanitize import sanitize_untrusted_text, sanitize_url
+from harness import _artifacts as artifacts_mod
+from harness._sanitize import sanitize_artifact_href, sanitize_untrusted_text
 
 IMPLICIT_ROLES: dict[str, str] = {
     "a": "link",  # only when href is set; we check that below
@@ -105,6 +106,7 @@ class Component:
     type: str | None = None
     href: str | None = None
     has_user_focus_rule: bool = False
+    effective_opacity: float = 1.0
 
     parent_index: int = -1
 
@@ -250,9 +252,14 @@ def _classify(elem: dict[str, Any], role: str) -> str | None:
 # -- Public API ------------------------------------------------------------
 
 
-def decompose(dom_path: Path) -> list[Component]:
-    """Decompose a single dom/<...>.json file into Components."""
-    data = json.loads(dom_path.read_text(encoding="utf-8"))
+def decompose_document(data: dict[str, Any]) -> list[Component]:
+    """Decompose an already parsed DOM capture into Components."""
+    expectation = (data.get("coverage") or {}).get("expectation") or {}
+    if expectation.get("status") == "blocked":
+        # Diagnostic captures document why review could not proceed. They are
+        # never product evidence and must not enter analysis through the
+        # library API or a later manual audit.
+        return []
     meta = data.get("meta", {})
     viewport_name = meta.get("viewport", "")
     state = meta.get("state", "")
@@ -280,7 +287,16 @@ def decompose(dom_path: Path) -> list[Component]:
 
     components: list[Component] = []
     for elem in raw_elements:
-        if elem.get("ariaHidden"):
+        if elem.get("ariaHidden") or elem.get("effectiveAriaHidden"):
+            continue
+        try:
+            effective_opacity = float(elem.get("effectiveOpacity", 1.0))
+        except (TypeError, ValueError):
+            effective_opacity = 1.0
+        if not math.isfinite(effective_opacity):
+            effective_opacity = 1.0
+        effective_opacity = max(0.0, min(1.0, effective_opacity))
+        if effective_opacity <= 0:
             continue
         # Sanitize untrusted page-derived strings before any downstream
         # decision uses them. Classification only looks at emptiness/length
@@ -290,7 +306,7 @@ def decompose(dom_path: Path) -> list[Component]:
         # classification helpers see the cleaned values consistently.
         safe_name = sanitize_untrusted_text(elem.get("name") or "")
         safe_text = sanitize_untrusted_text(elem.get("text") or "")
-        safe_href = sanitize_url(elem.get("href") or "") if elem.get("href") else None
+        safe_href = sanitize_artifact_href(elem.get("href") or "") if elem.get("href") else None
         elem["name"] = safe_name
         elem["text"] = safe_text
 
@@ -310,7 +326,6 @@ def decompose(dom_path: Path) -> list[Component]:
         kind = _classify(elem, role)
         if kind is None:
             continue
-
         components.append(
             Component(
                 index=elem["index"],
@@ -330,7 +345,9 @@ def decompose(dom_path: Path) -> list[Component]:
                 ),
                 disabled=elem.get("disabled", False),
                 aria_hidden=elem.get("ariaHidden", False),
-                aria_disabled=elem.get("ariaDisabled", False),
+                aria_disabled=bool(
+                    elem.get("ariaDisabled", False) or elem.get("effectiveAriaDisabled", False)
+                ),
                 aria_modal=elem.get("ariaModal", False),
                 aria_current=elem.get("ariaCurrent"),
                 has_alt=elem.get("hasAlt"),
@@ -341,6 +358,7 @@ def decompose(dom_path: Path) -> list[Component]:
                 type=elem.get("type"),
                 href=safe_href or None,
                 has_user_focus_rule=elem.get("hasUserFocusRule", False),
+                effective_opacity=effective_opacity,
                 parent_index=elem.get("parentIndex", -1),
                 viewport=viewport_name,
                 state=state,
@@ -355,3 +373,9 @@ def decompose(dom_path: Path) -> list[Component]:
         )
 
     return components
+
+
+def decompose(dom_path: Path) -> list[Component]:
+    """Read and decompose a single dom/<...>.json file into Components."""
+    data = artifacts_mod.read_dom_document(dom_path)
+    return decompose_document(data)

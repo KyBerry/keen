@@ -41,14 +41,22 @@ import json
 import logging
 import os
 import re
+import sys
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
+from harness import _artifacts as artifacts_mod
+from harness import _safeio as safeio_mod
 from harness._assets import asset_path
 from harness._sanitize import sanitize_dom_payload
 from harness._urlsafe import (
+    NetworkOrigin,
+    file_document_path,
+    file_scope_root,
+    network_origin,
     redact_url,
     revalidate_target_at_request_time,
     validate_target,
@@ -65,6 +73,9 @@ MAX_CAPTURE_CONCURRENCY = 8
 MAX_SCREENSHOT_PIXELS = 16_000_000
 MAX_SCREENSHOT_WIDTH_PX = 8_000
 MAX_SCREENSHOT_HEIGHT_PX = 20_000
+MAX_SESSION_STORAGE_ENTRIES = 256
+MAX_SESSION_STORAGE_BYTES = 1_048_576
+MAX_AUTH_STORAGE_STATE_BYTES = 8 * 1_048_576
 
 _AX_NAME_TAGS = frozenset(
     {
@@ -86,10 +97,35 @@ _AX_NAME_TAGS = frozenset(
 )
 _AX_MARKER_ATTR = "data-keen-ax-index"
 _AX_SNAPSHOT_CONCURRENCY = 20
+_AX_MAX_CANDIDATES = 500
+_AX_TOTAL_TIMEOUT_SECONDS = 20.0
 
 
 class CaptureFailure(RuntimeError):
     """Raised when one or more requested captures fail."""
+
+
+class CaptureBlocked(RuntimeError):
+    """Raised after diagnostic artifacts are saved for an unexpected surface."""
+
+    def __init__(
+        self,
+        *,
+        reason_code: str,
+        message: str,
+        screen_path: Path,
+        dom_path: Path,
+        expected_url: str | None = None,
+        observed_url: str | None = None,
+        expected_selector: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.screen_path = screen_path
+        self.dom_path = dom_path
+        self.expected_url = expected_url
+        self.observed_url = observed_url
+        self.expected_selector = expected_selector
 
 
 def _browser_launch_failure_message(exc: Exception) -> str:
@@ -132,7 +168,7 @@ def _parse_aria_snapshot_root(snapshot: str) -> tuple[str, str] | None:
     return role, str(name)
 
 
-async def _enrich_accessibility_names(page: Page, dom: dict[str, Any]) -> None:
+async def _enrich_accessibility_names(page: Page, dom: dict[str, Any]) -> dict[str, Any]:
     """Replace heuristic names with names computed by the browser AX tree.
 
     The in-page instrumentation retains the visible element array on a private
@@ -146,16 +182,17 @@ async def _enrich_accessibility_names(page: Page, dom: dict[str, Any]) -> None:
     """
     elements = dom.get("elements")
     if not isinstance(elements, list):
-        return
-    candidates = [
+        return {"eligible": 0, "attempted": 0, "enriched": 0, "complete": False}
+    eligible = [
         elem
         for elem in elements
         if isinstance(elem, dict)
         and isinstance(elem.get("index"), int)
         and (str(elem.get("tag") or "").lower() in _AX_NAME_TAGS or bool(elem.get("role")))
     ]
+    candidates = eligible[:_AX_MAX_CANDIDATES]
     if not candidates:
-        return
+        return {"eligible": 0, "attempted": 0, "enriched": 0, "complete": True}
 
     indices = [int(elem["index"]) for elem in candidates]
     await page.evaluate(
@@ -172,8 +209,10 @@ async def _enrich_accessibility_names(page: Page, dom: dict[str, Any]) -> None:
     )
 
     semaphore = asyncio.Semaphore(_AX_SNAPSHOT_CONCURRENCY)
+    enriched_count = 0
 
     async def enrich_one(elem: dict[str, Any]) -> None:
+        nonlocal enriched_count
         index = int(elem["index"])
         selector = f'[{_AX_MARKER_ATTR}="{index}"]'
         try:
@@ -187,9 +226,17 @@ async def _enrich_accessibility_names(page: Page, dom: dict[str, Any]) -> None:
         _role, name = parsed
         elem["name"] = name
         elem["nameSource"] = "browser-accessibility-tree"
+        enriched_count += 1
 
+    timed_out = False
     try:
-        await asyncio.gather(*(enrich_one(elem) for elem in candidates))
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(enrich_one(elem) for elem in candidates)),
+                timeout=_AX_TOTAL_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            timed_out = True
     finally:
         await page.evaluate(
             """
@@ -205,6 +252,24 @@ async def _enrich_accessibility_names(page: Page, dom: dict[str, Any]) -> None:
             """,
             _AX_MARKER_ATTR,
         )
+    failed_count = len(candidates) - enriched_count
+    complete = len(eligible) <= _AX_MAX_CANDIDATES and not timed_out and failed_count == 0
+    return {
+        "eligible": len(eligible),
+        "attempted": len(candidates),
+        "enriched": enriched_count,
+        "failed": failed_count,
+        "complete": complete,
+        "reason": (
+            "accessibility-name-timeout"
+            if timed_out
+            else "accessibility-name-cap"
+            if len(eligible) > _AX_MAX_CANDIDATES
+            else "accessibility-name-miss"
+            if failed_count
+            else None
+        ),
+    }
 
 
 def _validate_artifact_id(value: str, *, kind: str) -> str:
@@ -355,6 +420,8 @@ class CaptureConfig:
     viewports: list[str] = field(default_factory=lambda: ["mobile", "tablet", "desktop"])
     states: list[str] = field(default_factory=lambda: ["default"])
     full_page: bool = True
+    # `wait_selector` remains the programmatic name for backward
+    # compatibility; the CLI also exposes the clearer --expect-selector alias.
     wait_selector: str | None = None
     # Auth: prefer --auth-steps (declarative JSON DSL). --auth-script remains
     # as an escape hatch but requires CLI-side --unsafe-auth-script gating.
@@ -379,6 +446,248 @@ class CaptureConfig:
     # common cookie/GDPR banner accept-button selectors with a 500ms per-selector
     # timeout and clicks the first match. Logs which (if any) was matched.
     dismiss_banners: bool = False
+    # New 0.8.1 options stay after every 0.8.0 init field so existing
+    # positional CaptureConfig construction keeps its original meaning.
+    # When omitted, the requested target (including query/hash routes, while
+    # allowing canonical URL differences) is the expected final surface.
+    expect_url: str | None = None
+    # Opens a headed browser and waits for the user to finish authentication.
+    # Keen does not serialize the resulting browser state into project artifacts.
+    interactive_auth: bool = False
+    allow_origins: list[str] = field(default_factory=list)
+    # Computed during preflight from explicit file targets only. Browser
+    # redirects and subresources must stay inside these roots.
+    file_request_roots: tuple[Path, ...] = field(default_factory=tuple, init=False, repr=False)
+    file_document_paths: tuple[Path, ...] = field(default_factory=tuple, init=False, repr=False)
+    internal_request_origins: tuple[NetworkOrigin, ...] = field(
+        default_factory=tuple, init=False, repr=False
+    )
+
+
+@dataclass
+class AuthSession:
+    """Ephemeral browser state cloned into each requested capture context."""
+
+    storage_state: dict[str, Any]
+    session_storage: dict[str, dict[str, str]] = field(default_factory=dict)
+
+
+def _explicit_navigation_urls(
+    target: str,
+    expect_url: str | None = None,
+    auth_steps: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    urls = [target]
+    if expect_url is not None and "*" not in expect_url:
+        urls.append(expect_url)
+    if auth_steps is not None:
+        urls.extend(
+            str(step["url"])
+            for step in auth_steps
+            if step.get("action") == "goto" and isinstance(step.get("url"), str)
+        )
+    return urls
+
+
+def _derive_file_request_policy(
+    target: str,
+    expect_url: str | None = None,
+    auth_steps: list[dict[str, Any]] | None = None,
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """Grant exact documents plus their ordinary publication-asset roots."""
+    roots: list[Path] = []
+    documents: list[Path] = []
+    for url in _explicit_navigation_urls(target, expect_url, auth_steps):
+        if urlparse(url).scheme.lower() != "file":
+            continue
+        root = file_scope_root(url)
+        if root not in roots:
+            roots.append(root)
+        document = file_document_path(url)
+        if document not in documents:
+            documents.append(document)
+    return tuple(roots), tuple(documents)
+
+
+def _derive_internal_request_origins(
+    target: str,
+    expect_url: str | None = None,
+    auth_steps: list[dict[str, Any]] | None = None,
+    allow_origins: list[str] | None = None,
+) -> tuple[NetworkOrigin, ...]:
+    """Authorize only explicitly named HTTP(S) origins for internal access."""
+    origins: list[NetworkOrigin] = []
+    urls = _explicit_navigation_urls(target, expect_url, auth_steps)
+    urls.extend(allow_origins or [])
+    for url in urls:
+        if urlparse(url).scheme.lower() not in {"http", "https"}:
+            continue
+        origin = network_origin(url)
+        if origin not in origins:
+            origins.append(origin)
+    return tuple(origins)
+
+
+def _canonical_url_identity(
+    url: str,
+) -> tuple[str, str, int | None, str, str, str] | None:
+    """Return the stable URL fields used to recognize the requested surface."""
+    try:
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        if hostname:
+            hostname = hostname.encode("idna").decode("ascii")
+        port = parsed.port
+    except (UnicodeError, ValueError):
+        return None
+    if scheme not in {"http", "https", "file"}:
+        return None
+    if scheme == "file":
+        return scheme, "", None, parsed.path or "/", parsed.query, parsed.fragment
+    if not hostname:
+        return None
+    if port is None:
+        port = 80 if scheme == "http" else 443
+    # Chromium serializes Unicode paths with UTF-8 percent encoding. Preserve
+    # already-escaped reserved delimiters while normalizing Unicode and hex
+    # case so `/café` and `/caf%C3%A9` identify the same route.
+    path = quote(parsed.path or "/", safe="/:@!$&'()*+,;=-._~%")
+    path = re.sub(
+        r"%[0-9a-fA-F]{2}",
+        lambda match: match.group(0).upper(),
+        path,
+    )
+    if path != "/":
+        path = path.rstrip("/")
+    query = quote(parsed.query, safe="!$&'()*+,;=:@/?-._~%")
+    fragment = quote(parsed.fragment, safe="!$&'()*+,;=:@/?-._~%")
+    query = re.sub(r"%[0-9a-fA-F]{2}", lambda match: match.group(0).upper(), query)
+    fragment = re.sub(r"%[0-9a-fA-F]{2}", lambda match: match.group(0).upper(), fragment)
+    return scheme, hostname, port, path, query, fragment
+
+
+def _urls_equivalent(expected: str, observed: str) -> bool:
+    """Match canonical URLs while allowing a same-host HTTP→HTTPS upgrade."""
+    expected_id = _canonical_url_identity(expected)
+    observed_id = _canonical_url_identity(observed)
+    if expected_id is None or observed_id is None:
+        return False
+    if expected_id == observed_id:
+        return True
+    (
+        expected_scheme,
+        expected_host,
+        expected_port,
+        expected_path,
+        expected_query,
+        expected_fragment,
+    ) = expected_id
+    (
+        observed_scheme,
+        observed_host,
+        observed_port,
+        observed_path,
+        observed_query,
+        observed_fragment,
+    ) = observed_id
+    return (
+        expected_scheme == "http"
+        and observed_scheme == "https"
+        and expected_host == observed_host
+        and expected_port == 80
+        and observed_port == 443
+        and expected_path == observed_path
+        and expected_query == observed_query
+        and expected_fragment == observed_fragment
+    )
+
+
+def _url_matches_expectation(target: str, observed: str, expect_url: str | None) -> bool:
+    """Return whether the browser landed on the explicitly intended surface."""
+    expected = expect_url or target
+    if "*" in expected:
+        expected_id = _canonical_url_identity(expected)
+        observed_id = _canonical_url_identity(observed)
+        if expected_id is None or observed_id is None:
+            return False
+        (
+            expected_scheme,
+            expected_host,
+            expected_port,
+            expected_path,
+            expected_query,
+            expected_fragment,
+        ) = expected_id
+        (
+            observed_scheme,
+            observed_host,
+            observed_port,
+            observed_path,
+            observed_query,
+            observed_fragment,
+        ) = observed_id
+        same_authority = (
+            expected_scheme == observed_scheme
+            and expected_host == observed_host
+            and expected_port == observed_port
+        )
+        upgraded_authority = (
+            expected_scheme == "http"
+            and observed_scheme == "https"
+            and expected_host == observed_host
+            and expected_port == 80
+            and observed_port == 443
+        )
+        return (
+            (same_authority or upgraded_authority)
+            and fnmatchcase(observed_path, expected_path)
+            and (not expected_query or observed_query == expected_query)
+            and (not expected_fragment or observed_fragment == expected_fragment)
+        )
+    return _urls_equivalent(expected, observed)
+
+
+def _validate_capture_expectations(cfg: CaptureConfig) -> None:
+    """Fail before browser launch for unusable expectation inputs."""
+    if cfg.expect_url is not None:
+        if not isinstance(cfg.expect_url, str) or not cfg.expect_url.strip():
+            raise ValueError("--expect-url must be a non-empty URL or URL glob")
+        if len(cfg.expect_url) > 2_048:
+            raise ValueError("--expect-url exceeds the 2048-character limit")
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in cfg.expect_url):
+            raise ValueError("--expect-url must not contain control characters")
+        parsed_expectation = urlparse(cfg.expect_url)
+        if parsed_expectation.scheme not in {"http", "https", "file"}:
+            raise ValueError("--expect-url must be an absolute http(s)/file URL or URL glob")
+        if parsed_expectation.scheme in {"http", "https"} and not parsed_expectation.netloc:
+            raise ValueError("--expect-url must include an explicit host")
+        if "*" in parsed_expectation.scheme or "*" in parsed_expectation.netloc:
+            raise ValueError("--expect-url wildcards are allowed only in the path")
+        if "*" in parsed_expectation.query or "*" in parsed_expectation.fragment:
+            raise ValueError("--expect-url wildcards are allowed only in the path")
+        if parsed_expectation.username is not None or parsed_expectation.password is not None:
+            raise ValueError("--expect-url must not contain URL userinfo")
+        if "*" not in cfg.expect_url and _canonical_url_identity(cfg.expect_url) is None:
+            raise ValueError("--expect-url is not a valid absolute URL")
+    if cfg.wait_selector is not None:
+        _validate_selector(cfg.wait_selector, where="--expect-selector")
+
+
+def _url_expectation_failure(cfg: CaptureConfig, observed_url: str) -> dict[str, Any] | None:
+    """Build a redacted coverage failure when navigation reached another page."""
+    if _url_matches_expectation(cfg.target, observed_url, cfg.expect_url):
+        return None
+    expected = cfg.expect_url or redact_url(cfg.target)
+    return {
+        "complete": False,
+        "status": "blocked",
+        "reason_code": "unexpected-url",
+        "message": "The browser reached a different URL than the requested review surface.",
+        "target": redact_url(cfg.target),
+        "expected_url": redact_url(expected),
+        "observed_url": redact_url(observed_url),
+    }
 
 
 # -- DOM instrumentation ---------------------------------------------------
@@ -411,10 +720,16 @@ INSTRUMENT_JS = r"""
 
   const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'NOSCRIPT', 'TEMPLATE', 'HEAD']);
 
+  function composedParent(el) {
+    if (el.parentElement) return el.parentElement;
+    const root = el.getRootNode ? el.getRootNode() : null;
+    return root && root.host && root.host.nodeType === Node.ELEMENT_NODE ? root.host : null;
+  }
+
   function isVisible(el, rect, cs) {
     if (rect.width === 0 || rect.height === 0) return false;
     if (cs.display === 'none' || cs.visibility === 'hidden') return false;
-    if (parseFloat(cs.opacity) === 0) return false;
+    if (effectiveOpacity(el) <= 0) return false;
     return true;
   }
 
@@ -468,7 +783,8 @@ INSTRUMENT_JS = r"""
       let top = rect.top;
       let bottom = rect.bottom;
       let ancestor = node.parentElement;
-      while (ancestor && ancestor !== document.documentElement) {
+      let ancestorDepth = 0;
+      while (ancestor && ancestor !== document.documentElement && ancestorDepth < 128) {
         const styles = getComputedStyle(ancestor);
         const ancestorRect = ancestor.getBoundingClientRect();
         if (styles.overflowX !== 'visible') {
@@ -479,7 +795,8 @@ INSTRUMENT_JS = r"""
           top = Math.max(top, ancestorRect.top);
           bottom = Math.min(bottom, ancestorRect.bottom);
         }
-        ancestor = ancestor.parentElement;
+        ancestor = composedParent(ancestor);
+        ancestorDepth += 1;
       }
       return right - left > 1 && bottom - top > 1;
     });
@@ -522,12 +839,15 @@ INSTRUMENT_JS = r"""
   }
 
   function hasHorizontalOverflowAncestor(el) {
-    let parent = el.parentElement;
-    while (parent && parent !== document.body && parent !== document.documentElement) {
+    let parent = composedParent(el);
+    let depth = 0;
+    while (parent && parent !== document.body
+        && parent !== document.documentElement && depth < 128) {
       const styles = getComputedStyle(parent);
       const clipsX = ['auto', 'scroll', 'hidden', 'clip'].includes(styles.overflowX);
       if (clipsX && parent.scrollWidth > parent.clientWidth + 1) return true;
-      parent = parent.parentElement;
+      parent = composedParent(parent);
+      depth += 1;
     }
     return false;
   }
@@ -535,8 +855,40 @@ INSTRUMENT_JS = r"""
   function pickStyles(el) {
     const cs = window.getComputedStyle(el);
     const out = {};
-    for (const k of STYLE_PROPS) out[k] = cs[k];
+    for (const k of STYLE_PROPS) {
+      const value = cs[k];
+      out[k] = typeof value === 'string' ? value : '';
+    }
     return [out, cs];
+  }
+
+  function effectiveOpacity(el) {
+    let value = 1;
+    let current = el;
+    while (current && current.nodeType === Node.ELEMENT_NODE) {
+      const opacity = Number(getComputedStyle(current).opacity);
+      if (Number.isFinite(opacity)) value *= opacity;
+      current = composedParent(current);
+    }
+    return Math.max(0, Math.min(1, value));
+  }
+
+  function effectiveAriaHidden(el) {
+    let current = el;
+    while (current && current.nodeType === Node.ELEMENT_NODE) {
+      if (current.getAttribute('aria-hidden') === 'true') return true;
+      current = composedParent(current);
+    }
+    return false;
+  }
+
+  function effectiveAriaDisabled(el) {
+    let current = el;
+    while (current && current.nodeType === Node.ELEMENT_NODE) {
+      if (current.getAttribute('aria-disabled') === 'true') return true;
+      current = composedParent(current);
+    }
+    return false;
   }
 
   // Scan stylesheets for :focus / :focus-visible rules. We strip the pseudo
@@ -653,10 +1005,12 @@ INSTRUMENT_JS = r"""
     const textInfo = visibleTextInfo(el, styles.color);
 
     let parentIndex = -1;
-    let p = el.parentElement;
-    while (p) {
+    let p = composedParent(el);
+    let parentDepth = 0;
+    while (p && parentDepth < 128) {
       if (indexMap.has(p)) { parentIndex = indexMap.get(p); break; }
-      p = p.parentElement;
+      p = composedParent(p);
+      parentDepth += 1;
     }
 
     const directText = (el.childNodes.length === 1 && el.firstChild.nodeType === 3)
@@ -683,14 +1037,16 @@ INSTRUMENT_JS = r"""
       href: el.getAttribute('href') || null,
       ariaLabel: el.getAttribute('aria-label') || null,
       ariaHidden: el.getAttribute('aria-hidden') === 'true',
+      effectiveAriaHidden: effectiveAriaHidden(el),
       ariaDisabled: el.getAttribute('aria-disabled') === 'true',
+      effectiveAriaDisabled: effectiveAriaDisabled(el),
       ariaModal: el.getAttribute('aria-modal') === 'true',
       ariaCurrent: el.getAttribute('aria-current') || null,
       hasAlt: el.tagName === 'IMG' ? el.hasAttribute('alt') : null,
       autocomplete: el.getAttribute('autocomplete') || null,
       inputmode: el.getAttribute('inputmode') || null,
       required: el.required || el.getAttribute('aria-required') === 'true' || false,
-      disabled: el.disabled || false,
+      disabled: Boolean(el.disabled || (el.matches && el.matches(':disabled'))),
       tabIndex: el.tabIndex,
       name: accessibleName(el),
       nameSource: 'dom-heuristic',
@@ -707,6 +1063,7 @@ INSTRUMENT_JS = r"""
         h: Math.round(rect.height),
       },
       styles,
+      effectiveOpacity: effectiveOpacity(el),
       parentIndex,
       hasUserFocusRule: hasFocusRule,
     });
@@ -742,6 +1099,33 @@ INSTRUMENT_JS = r"""
       evidence_complete: focusInfo.inaccessibleStylesheets === 0,
     },
     focused_index: focusedIndex,
+    surface: (() => {
+      const body = document.body;
+      const root = document.documentElement;
+      const text = body ? (body.innerText || '').trim() : '';
+      const paintedBackground = [body, root].some(element => {
+        if (!element) return false;
+        const style = getComputedStyle(element);
+        const image = style.backgroundImage;
+        const color = style.backgroundColor;
+        return (image && image !== 'none')
+          || (color
+            && color !== 'transparent'
+            && !/^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/i.test(color));
+      });
+      const pseudoContent = body && ['::before', '::after'].some(pseudo => {
+        const style = getComputedStyle(body, pseudo);
+        const content = style.content;
+        return style.display !== 'none'
+          && content
+          && !['none', 'normal', '""', "''"].includes(content);
+      });
+      return {
+        body_text_chars: text.length,
+        painted_background: paintedBackground,
+        pseudo_content: Boolean(pseudoContent),
+      };
+    })(),
     elements: results,
     truncated: visibleTruncated || collected.traversalTruncated,
     coverage: {
@@ -768,6 +1152,13 @@ def _slug(s: str) -> str:
     if not base:
         base = parsed.netloc or "root"
     base = re.sub(r"[^a-zA-Z0-9._-]+", "-", base).strip("-").lower()
+    base = (base or "page")[:100].rstrip(".")
+    if base.upper() in {"CON", "PRN", "AUX", "NUL"} or re.fullmatch(
+        r"(?:COM|LPT)[1-9]",
+        base,
+        flags=re.IGNORECASE,
+    ):
+        base = f"page-{base}"
     return base or "page"
 
 
@@ -829,6 +1220,19 @@ _AUTH_STEPS_MAX_BYTES = 262_144
 # this hard ceiling.
 _WAIT_TIMEOUT_MAX_MS = 60_000
 _WAIT_TIMEOUT_DEFAULT_MS = 15_000
+_TIMED_AUTH_ACTIONS = frozenset(
+    {
+        "goto",
+        "wait_for_selector",
+        "wait_for_url",
+        "fill",
+        "click",
+        "press",
+        "check",
+        "uncheck",
+        "select_option",
+    }
+)
 
 # Press-key whitelist. Playwright accepts free-form key chords like
 # `Control+A`, which means an attacker-controlled JSON could deliver
@@ -1031,7 +1435,12 @@ def _validate_press_key(key: Any, *, where: str) -> str:
     return key
 
 
-def validate_auth_steps(data: Any) -> list[dict[str, Any]]:
+def validate_auth_steps(
+    data: Any,
+    *,
+    allow_internal: bool = False,
+    allow_file: bool = False,
+) -> list[dict[str, Any]]:
     """Validate the top-level shape and each step. Returns the steps list.
 
     Schema:
@@ -1085,12 +1494,15 @@ def validate_auth_steps(data: Any) -> list[dict[str, Any]]:
             # SSRF guard — same gate as the top-level target. Without this
             # a malicious auth-steps JSON could redirect the page to
             # http://169.254.169.254/ (cloud metadata) and then
-            # wait_for_url to capture credentials. allow_internal=False
-            # closes the door; the caller can override via the
-            # --allow-internal CLI flag, but only by patching the dispatch
-            # site, not via the JSON.
+            # wait_for_url to capture credentials. Private/file targets remain
+            # denied by default. The caller may pass an explicit policy only
+            # after the corresponding CLI permission was granted.
             try:
-                validate_target(url, allow_internal=False, allow_file=False)
+                validate_target(
+                    url,
+                    allow_internal=allow_internal,
+                    allow_file=allow_file,
+                )
             except ValueError as e:
                 raise ValueError(f"{where}: 'goto' url rejected: {e}") from e
         elif action == "wait_for_selector":
@@ -1102,6 +1514,12 @@ def validate_auth_steps(data: Any) -> list[dict[str, Any]]:
             pattern = step.get("pattern")
             if not isinstance(pattern, str) or not pattern:
                 raise ValueError(f"{where}: 'wait_for_url' requires non-empty 'pattern' string")
+            if "://" in pattern:
+                parsed_pattern = urlparse(pattern)
+                if "*" in parsed_pattern.scheme or "*" in parsed_pattern.netloc:
+                    raise ValueError(
+                        f"{where}: 'wait_for_url' wildcards are allowed only in the path"
+                    )
             # Cap the wait so a never-matching pattern can't block
             # indefinitely. timeout_ms (if present) is also validated
             # against _WAIT_TIMEOUT_MAX_MS below at the top-level
@@ -1169,14 +1587,13 @@ def validate_auth_steps(data: Any) -> list[dict[str, Any]]:
         # Optional per-step timeout (applies to actions that take one).
         timeout = step.get("timeout_ms")
         if timeout is not None:
-            if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 0:
-                raise ValueError(f"{where}: 'timeout_ms' must be a non-negative int")
-            # wait_for_url has its own hard ceiling so a hostile JSON can't
-            # set timeout_ms = 24 hours and stall the run forever. Other
-            # actions inherit Playwright's own default semantics.
-            if action == "wait_for_url" and timeout > _WAIT_TIMEOUT_MAX_MS:
+            if action not in _TIMED_AUTH_ACTIONS:
+                raise ValueError(f"{where}: 'timeout_ms' is not valid for action {action!r}")
+            if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+                raise ValueError(f"{where}: 'timeout_ms' must be a positive int")
+            if timeout > _WAIT_TIMEOUT_MAX_MS:
                 raise ValueError(
-                    f"{where}: 'wait_for_url.timeout_ms' exceeds cap of "
+                    f"{where}: '{action}.timeout_ms' exceeds cap of "
                     f"{_WAIT_TIMEOUT_MAX_MS}ms (got {timeout})"
                 )
 
@@ -1200,7 +1617,12 @@ def _env_required(name: str, *, where: str) -> str:
         raise ValueError(f"env var {name} not set for {where}") from e
 
 
-def load_and_validate_auth_steps(steps_path: Path) -> list[dict[str, Any]]:
+def load_and_validate_auth_steps(
+    steps_path: Path,
+    *,
+    allow_internal: bool = False,
+    allow_file: bool = False,
+) -> list[dict[str, Any]]:
     """Load + size-cap + parse + schema-validate the auth-steps JSON.
 
     Split out from ``apply_auth_steps`` so callers can fail fast BEFORE
@@ -1210,40 +1632,52 @@ def load_and_validate_auth_steps(steps_path: Path) -> list[dict[str, Any]]:
 
     Hardening:
       * File size cap (256 KiB) catches gigabyte-JSON DoS.
-      * ``Path.stat()`` + ``read_text`` keeps the whole file in memory
-        only after the cap check passes.
+      * A single bounded binary read avoids a stat/read race and never loads
+        more than one byte beyond the cap.
       * ``validate_auth_steps`` enforces the schema + SSRF guard on
         ``goto`` URLs.
-
-    NOTE on TOCTOU: between ``stat()`` and ``read_text()``, an attacker
-    who controls the file path could swap the file. The size check would
-    no longer match what we parse. Mitigation here is single-process
-    reading and the JSON-decode-then-validate flow: the validator still
-    runs against whatever bytes we actually read, so a swap can only
-    weaken the size cap, not the schema gate. Stronger fix would be
-    opening the file then fstat'ing the fd, but Path.read_text doesn't
-    expose that. Documented for now.
     """
     if not steps_path.exists():
         raise FileNotFoundError(f"auth-steps file not found: {steps_path}")
+    if steps_path.is_symlink():
+        raise ValueError(f"auth-steps file must not be a symlink: {steps_path}")
     try:
-        size = steps_path.stat().st_size
+        with steps_path.open("rb") as handle:
+            raw = handle.read(_AUTH_STEPS_MAX_BYTES + 1)
     except OSError as e:
-        raise ValueError(f"auth-steps file stat failed for {steps_path}: {e}") from e
-    if size > _AUTH_STEPS_MAX_BYTES:
+        raise ValueError(f"auth-steps file read failed for {steps_path}: {e}") from e
+    if len(raw) > _AUTH_STEPS_MAX_BYTES:
         raise ValueError(
-            f"auth-steps file too large: {size} bytes exceeds cap of "
+            f"auth-steps file too large: exceeds cap of "
             f"{_AUTH_STEPS_MAX_BYTES} bytes (256 KiB). Trim the JSON or "
             "raise the cap if your login flow genuinely needs that much."
         )
     try:
-        data = json.loads(steps_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise ValueError(f"auth-steps JSON parse error in {steps_path}: {e}") from e
-    return validate_auth_steps(data)
+    return validate_auth_steps(
+        data,
+        allow_internal=allow_internal,
+        allow_file=allow_file,
+    )
 
 
-async def apply_auth_steps(page: Page, steps_path: Path) -> None:
+def _validate_auth_environment(steps: list[dict[str, Any]]) -> None:
+    """Fail before browser launch when a declared credential variable is absent."""
+    for index, step in enumerate(steps):
+        name = step.get("value_env")
+        if isinstance(name, str) and name not in os.environ:
+            raise ValueError(f"env var {name} not set for auth step {index}")
+
+
+async def apply_auth_steps(
+    page: Page,
+    steps_path: Path,
+    *,
+    allow_internal: bool = False,
+    allow_file: bool = False,
+) -> None:
     """Run the declarative auth steps in `steps_path` against `page`.
 
     Args:
@@ -1259,8 +1693,17 @@ async def apply_auth_steps(page: Page, steps_path: Path) -> None:
     closed dispatch table and parameters are passed via Playwright's
     arg-binding form (page.evaluate(expr, arg)).
     """
-    steps = load_and_validate_auth_steps(steps_path)
+    steps = load_and_validate_auth_steps(
+        steps_path,
+        allow_internal=allow_internal,
+        allow_file=allow_file,
+    )
     n = len(steps)
+
+    def step_timeout(step: dict[str, Any], default: int) -> int:
+        requested = int(step.get("timeout_ms", default))
+        return max(1, min(requested, _WAIT_TIMEOUT_MAX_MS))
+
     for i, step in enumerate(steps, start=1):
         action = step["action"]
         # Defense in depth: re-check that the action is in the closed set.
@@ -1279,19 +1722,21 @@ async def apply_auth_steps(page: Page, steps_path: Path) -> None:
             # between validation and execution (TOCTOU). Re-resolving the
             # host here closes that small window and matches the SSRF
             # pattern used by validate_target at the top-level target.
-            validate_target(step["url"], allow_internal=False, allow_file=False)
+            validate_target(
+                step["url"],
+                allow_internal=allow_internal,
+                allow_file=allow_file,
+            )
             logger.info("auth step %d/%d: goto %s", i, n, redact_url(step["url"]))
             await page.goto(
                 step["url"],
-                timeout=int(step.get("timeout_ms", 30000)),
+                timeout=step_timeout(step, 30_000),
                 wait_until="domcontentloaded",
             )
         elif action == "wait_for_selector":
             sel = step["selector"]
             logger.info("auth step %d/%d: wait_for_selector %s", i, n, sel)
-            kwargs: dict[str, Any] = {
-                "timeout": int(step.get("timeout_ms", _WAIT_TIMEOUT_DEFAULT_MS))
-            }
+            kwargs: dict[str, Any] = {"timeout": step_timeout(step, _WAIT_TIMEOUT_DEFAULT_MS)}
             if step.get("state"):
                 kwargs["state"] = step["state"]
             await page.wait_for_selector(sel, **kwargs)
@@ -1299,8 +1744,7 @@ async def apply_auth_steps(page: Page, steps_path: Path) -> None:
             pattern = step["pattern"]
             # Cap the wait. Validator already enforces the ceiling on
             # explicit timeout_ms, but clamp here too for belt + braces.
-            requested = int(step.get("timeout_ms", _WAIT_TIMEOUT_DEFAULT_MS))
-            timeout_ms = min(requested, _WAIT_TIMEOUT_MAX_MS)
+            timeout_ms = step_timeout(step, _WAIT_TIMEOUT_DEFAULT_MS)
             logger.info(
                 "auth step %d/%d: wait_for_url %s (timeout=%dms)",
                 i,
@@ -1324,7 +1768,7 @@ async def apply_auth_steps(page: Page, steps_path: Path) -> None:
                     n,
                     sel,
                 )
-            await page.fill(sel, value, timeout=int(step.get("timeout_ms", 15000)))
+            await page.fill(sel, value, timeout=step_timeout(step, 15_000))
         elif action == "set_storage":
             env_name = step["value_env"]
             value = _env_required(env_name, where=f"set_storage step {i}")
@@ -1343,7 +1787,11 @@ async def apply_auth_steps(page: Page, steps_path: Path) -> None:
             env_name = step["value_env"]
             value = _env_required(env_name, where=f"set_cookie step {i}")
             current_url = str(page.url)
-            validate_target(current_url, allow_internal=False, allow_file=False)
+            validate_target(
+                current_url,
+                allow_internal=allow_internal,
+                allow_file=allow_file,
+            )
             logger.info(
                 "auth step %d/%d: set_cookie %s (from env %s)",
                 i,
@@ -1357,7 +1805,7 @@ async def apply_auth_steps(page: Page, steps_path: Path) -> None:
         elif action == "click":
             sel = step["selector"]
             logger.info("auth step %d/%d: click %s", i, n, sel)
-            kwargs = {"timeout": int(step.get("timeout_ms", 15000))}
+            kwargs = {"timeout": step_timeout(step, 15_000)}
             if step.get("button"):
                 kwargs["button"] = step["button"]
             await page.click(sel, **kwargs)
@@ -1365,15 +1813,15 @@ async def apply_auth_steps(page: Page, steps_path: Path) -> None:
             sel = step["selector"]
             key = step["key"]
             logger.info("auth step %d/%d: press %s on %s", i, n, key, sel)
-            await page.press(sel, key, timeout=int(step.get("timeout_ms", 15000)))
+            await page.press(sel, key, timeout=step_timeout(step, 15_000))
         elif action == "check":
             sel = step["selector"]
             logger.info("auth step %d/%d: check %s", i, n, sel)
-            await page.check(sel, timeout=int(step.get("timeout_ms", 15000)))
+            await page.check(sel, timeout=step_timeout(step, 15_000))
         elif action == "uncheck":
             sel = step["selector"]
             logger.info("auth step %d/%d: uncheck %s", i, n, sel)
-            await page.uncheck(sel, timeout=int(step.get("timeout_ms", 15000)))
+            await page.uncheck(sel, timeout=step_timeout(step, 15_000))
         elif action == "select_option":
             sel = step["selector"]
             logger.info("auth step %d/%d: select_option %s", i, n, sel)
@@ -1381,13 +1829,13 @@ async def apply_auth_steps(page: Page, steps_path: Path) -> None:
                 await page.select_option(
                     sel,
                     step["values"],
-                    timeout=int(step.get("timeout_ms", 15000)),
+                    timeout=step_timeout(step, 15_000),
                 )
             else:
                 await page.select_option(
                     sel,
                     step["value"],
-                    timeout=int(step.get("timeout_ms", 15000)),
+                    timeout=step_timeout(step, 15_000),
                 )
         elif action == "eval_safe":
             kind, args = _parse_eval_safe(step["expr"])
@@ -1489,9 +1937,17 @@ async def _resolve_locator(page, selector: str, fallback: str | None):
             if await loc.count() > 0:
                 return loc
         except (ValueError, TypeError) as e:
-            logger.warning("locator lookup for selector '%s' failed: %s", selector, e)
+            logger.warning(
+                "locator lookup for selector '%s' failed: %s",
+                selector,
+                type(e).__name__,
+            )
         except Exception as e:
-            logger.warning("locator lookup for selector '%s' missed: %s", selector, e)
+            logger.warning(
+                "locator lookup for selector '%s' missed: %s",
+                selector,
+                type(e).__name__,
+            )
     if fallback and fallback in _FALLBACK_SELECTORS and _FALLBACK_SELECTORS[fallback]:
         try:
             loc = page.locator(_FALLBACK_SELECTORS[fallback]).first
@@ -1575,25 +2031,27 @@ async def _install_ssrf_route_guard(
     *,
     allow_internal: bool,
     allow_file: bool,
+    file_roots: tuple[Path, ...],
+    file_documents: tuple[Path, ...],
+    internal_origins: tuple[NetworkOrigin, ...],
 ) -> None:
     """Register a per-context route handler that re-validates every request.
 
-    Pre-flight `validate_target` only checks the initial URL once. That's
-    not enough on its own to stop:
+    Pre-flight `validate_target` only checks the initial URL once. The route
+    guard adds coverage for:
 
-        1. DNS rebinding — a malicious DNS server returns a public IP for
-           the validator's `getaddrinfo` and a private IP when the browser
-           resolves the same name moments later for the actual TCP connect.
+        1. DNS changes that Python's request-time resolution observes.
         2. Redirect chains — `http://attacker.com/r` -> 302 ->
            `http://169.254.169.254/`. Playwright follows the redirect and
            fetches the metadata endpoint without us ever re-checking.
         3. Sub-resources — a benign-looking page <iframe>s or <img>s a
            private URL.
 
-    The route handler runs on every request the page makes (navigations,
-    redirects, sub-resources), so re-validating `request.url` here closes
-    all three holes. Aborted requests show up to the page as net::FAILED,
-    which `_goto_with_retries` already treats as retryable / reportable.
+    The route handler runs on every request the page makes. It cannot pin
+    Chromium's DNS answer to Python's separately resolved address, so it
+    mitigates but does not fully eliminate same-request DNS rebinding. Aborted
+    requests show up to the page as net::FAILED, which `_goto_with_retries`
+    already treats as retryable/reportable.
     """
 
     async def _on_request(route) -> None:
@@ -1603,6 +2061,11 @@ async def _install_ssrf_route_guard(
                 url,
                 allow_internal=allow_internal,
                 allow_file=allow_file,
+                file_roots=file_roots,
+                file_documents=file_documents,
+                resource_type=route.request.resource_type,
+                is_navigation_request=route.request.is_navigation_request(),
+                internal_origins=internal_origins,
             )
         except ValueError as e:
             # Use redact_url so we never log session tokens from sub-resources.
@@ -1720,32 +2183,209 @@ async def _goto_with_retries(page, url: str, timeout_ms: int) -> None:
                 # Not a retryable network error — bubble up immediately.
                 raise
             last_exc = e
-            logger.warning("goto attempt %d/3 failed: %s", attempt, msg)
+            code_match = re.search(r"net::[A-Z0-9_]+", msg)
+            code = code_match.group(0) if code_match else "browser-network-error"
+            logger.warning(
+                "goto attempt %d/3 failed for %s: %s",
+                attempt,
+                redact_url(url),
+                code,
+            )
         if attempt < 3:
             await asyncio.sleep(backoffs[attempt - 1])
     # All three attempts failed.
-    logger.error("goto failed after 3 attempts: %s", last_exc)
+    logger.error(
+        "goto failed after 3 attempts for %s: %s",
+        redact_url(url),
+        type(last_exc).__name__ if last_exc is not None else "unknown-error",
+    )
     if last_exc is None:  # Defensive invariant; do not rely on assert under -O.
         raise RuntimeError("goto retries exhausted without a captured exception")
     raise last_exc
 
 
-async def _install_websocket_block(context) -> None:
-    """Close WebSockets because they bypass normal HTTP route interception."""
+async def _install_websocket_block(context) -> dict[str, int]:
+    """Close WebSockets and expose whether the captured surface attempted one."""
+    status = {"attempted": 0}
 
     async def _close_web_socket(route) -> None:
+        status["attempted"] += 1
         await route.close(code=1008, reason="WebSockets disabled during Keen capture")
 
     await context.route_web_socket("**/*", _close_web_socket)
+    return status
+
+
+def _interactive_terminal_available() -> bool:
+    return bool(sys.stdin is not None and sys.stdin.isatty())
+
+
+def _wait_for_interactive_auth_confirmation() -> None:
+    """Wait for an explicit terminal confirmation without reading credentials."""
+    print(
+        "Keen opened Chromium for authentication.\n"
+        "Sign in normally, then return to this terminal and press Enter. "
+        "Keen will reuse the resulting ephemeral browser state without writing it "
+        "to the review artifacts.",
+        file=sys.stderr,
+        flush=True,
+    )
+    if sys.stdin.readline() == "":
+        raise ValueError("interactive authentication ended before confirmation")
+
+
+async def _snapshot_session_storage(page: Page) -> dict[str, dict[str, str]]:
+    """Capture bounded sessionStorage for the current origin in memory."""
+    payload = await page.evaluate(
+        """
+        () => ({
+          origin: window.location.origin,
+          entries: Object.entries(window.sessionStorage),
+        })
+        """
+    )
+    if not isinstance(payload, dict):
+        return {}
+    origin = payload.get("origin")
+    entries = payload.get("entries")
+    if not isinstance(origin, str) or not origin or not isinstance(entries, list):
+        return {}
+    if len(entries) > MAX_SESSION_STORAGE_ENTRIES:
+        raise ValueError(
+            "authenticated sessionStorage exceeds the safe entry limit; "
+            "use declarative cookie/localStorage authentication instead"
+        )
+    seed: dict[str, str] = {}
+    total_bytes = 0
+    for entry in entries:
+        if (
+            not isinstance(entry, list)
+            or len(entry) != 2
+            or not isinstance(entry[0], str)
+            or not isinstance(entry[1], str)
+        ):
+            continue
+        key, value = entry
+        total_bytes += len(key.encode("utf-8")) + len(value.encode("utf-8"))
+        if total_bytes > MAX_SESSION_STORAGE_BYTES:
+            raise ValueError(
+                "authenticated sessionStorage exceeds the safe in-memory size limit; "
+                "use declarative cookie/localStorage authentication instead"
+            )
+        seed[key] = value
+    return {origin: seed} if seed else {}
+
+
+def _same_product_origin(target: str, observed: str) -> bool:
+    target_id = _canonical_url_identity(target)
+    observed_id = _canonical_url_identity(observed)
+    if target_id is None or observed_id is None:
+        return False
+    target_scheme, target_host, target_port, *_ = target_id
+    observed_scheme, observed_host, observed_port, *_ = observed_id
+    return target_host == observed_host and (
+        (target_scheme, target_port) == (observed_scheme, observed_port)
+        or (
+            target_scheme == "http"
+            and target_port == 80
+            and observed_scheme == "https"
+            and observed_port == 443
+        )
+    )
+
+
+async def _snapshot_product_session_storage(
+    context,
+    preferred_page,
+    target: str,
+) -> dict[str, dict[str, str]]:
+    """Capture sessionStorage only from live product-origin tabs, never an IdP."""
+    pages = [preferred_page]
+    pages.extend(reversed(context.pages))
+    seen: set[int] = set()
+    merged: dict[str, dict[str, str]] = {}
+    for page in pages[:16]:
+        marker = id(page)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        page_url = getattr(page, "url", None)
+        if page is preferred_page:
+            if not isinstance(page_url, str) or not _same_product_origin(target, page_url):
+                continue
+        elif isinstance(page_url, str) and not _same_product_origin(target, page_url):
+            continue
+        try:
+            snapshot = await _snapshot_session_storage(page)
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.info(
+                "sessionStorage snapshot skipped for one browser tab: %s",
+                type(exc).__name__,
+            )
+            continue
+        for origin, entries in snapshot.items():
+            if not _same_product_origin(target, origin):
+                continue
+            merged.setdefault(origin, {}).update(entries)
+    encoded = json.dumps(merged, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > MAX_SESSION_STORAGE_BYTES:
+        raise ValueError("authenticated sessionStorage exceeds the safe in-memory size limit")
+    return merged
+
+
+def _bounded_auth_storage_state(storage_state: Any) -> dict[str, Any]:
+    if not isinstance(storage_state, dict):
+        raise ValueError("browser returned an invalid authentication storage state")
+    try:
+        encoded = json.dumps(
+            storage_state,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ValueError("browser returned an unserializable authentication storage state") from exc
+    if len(encoded) > MAX_AUTH_STORAGE_STATE_BYTES:
+        raise ValueError(
+            "authenticated browser state exceeds the safe in-memory size limit; "
+            "clear unnecessary site data or use narrower declarative authentication"
+        )
+    return storage_state
+
+
+async def _install_session_storage_seed(
+    context,
+    session_storage: dict[str, dict[str, str]],
+) -> None:
+    """Restore origin-scoped sessionStorage before application scripts run."""
+    if not session_storage:
+        return
+    # JSON serialization makes keys and values inert JavaScript data. The
+    # generated init script exists only in the browser process and is never
+    # written to Keen artifacts.
+    seed_json = json.dumps(session_storage, ensure_ascii=True, separators=(",", ":"))
+    await context.add_init_script(
+        script=(
+            "(() => {"
+            f"const seed={seed_json};"
+            "const entries=seed[window.location.origin];"
+            "if(!entries)return;"
+            "for(const [key,value] of Object.entries(entries)){"
+            "window.sessionStorage.setItem(key,value);"
+            "}"
+            "})();"
+        )
+    )
 
 
 async def _prepare_auth_storage_state(
     browser,
     cfg: CaptureConfig,
     presets: dict[str, dict[str, int]],
-) -> dict[str, Any] | None:
+) -> AuthSession | None:
     """Authenticate once in memory, then clone the resulting state per capture."""
-    if cfg.auth_steps_path is None and cfg.auth_script is None:
+    if cfg.auth_steps_path is None and cfg.auth_script is None and not cfg.interactive_auth:
         return None
     preset = presets[cfg.viewports[0]]
     context = await browser.new_context(
@@ -1762,15 +2402,38 @@ async def _prepare_auth_storage_state(
             context,
             allow_internal=cfg.allow_internal,
             allow_file=cfg.allow_file,
+            file_roots=cfg.file_request_roots,
+            file_documents=cfg.file_document_paths,
+            internal_origins=cfg.internal_request_origins,
         )
-        await _install_websocket_block(context)
+        websocket_status = await _install_websocket_block(context)
         page = await context.new_page()
-        if cfg.auth_steps_path is not None:
-            await apply_auth_steps(page, cfg.auth_steps_path)
+        if cfg.interactive_auth:
+            await _goto_with_retries(page, cfg.target, cfg.goto_timeout_ms)
+            await asyncio.to_thread(_wait_for_interactive_auth_confirmation)
+        elif cfg.auth_steps_path is not None:
+            await apply_auth_steps(
+                page,
+                cfg.auth_steps_path,
+                allow_internal=cfg.allow_internal,
+                allow_file=cfg.allow_file,
+            )
         else:
             await _maybe_login(page, cfg.auth_script)
+        if websocket_status["attempted"]:
+            logger.warning(
+                "authentication surface attempted %d WebSocket connection(s); Keen blocked them",
+                websocket_status["attempted"],
+            )
         logger.info("authentication completed once; reusing in-memory storage state")
-        return await context.storage_state()
+        storage_state = _bounded_auth_storage_state(await context.storage_state(indexed_db=True))
+        return AuthSession(
+            # Some authentication SDKs persist their tokens in IndexedDB.
+            # Include it in the ephemeral state clone so interactive sign-in
+            # works without writing a reusable credential file to disk.
+            storage_state=storage_state,
+            session_storage=await _snapshot_product_session_storage(context, page, cfg.target),
+        )
     finally:
         await context.close()
 
@@ -1782,7 +2445,7 @@ async def _capture_one(
     states: dict[str, dict[str, Any]],
     viewport: str,
     state: str,
-    storage_state: dict[str, Any] | None = None,
+    auth_session: AuthSession | None = None,
 ) -> tuple[Path, Path]:
     # SSRF guard — re-validate per task so the gate is local to capture and
     # not just at CLI parse time.
@@ -1804,14 +2467,14 @@ async def _capture_one(
         "service_workers": "block",
         "bypass_csp": False,
     }
-    if storage_state is not None:
-        context_options["storage_state"] = storage_state
+    if auth_session is not None:
+        context_options["storage_state"] = auth_session.storage_state
     context = await browser.new_context(
         **context_options,
     )
     try:
         # Defeat cross-target leakage between siblings sharing a browser.
-        if storage_state is None:
+        if auth_session is None:
             await context.clear_cookies()
         await context.clear_permissions()
 
@@ -1823,80 +2486,179 @@ async def _capture_one(
             context,
             allow_internal=cfg.allow_internal,
             allow_file=cfg.allow_file,
+            file_roots=cfg.file_request_roots,
+            file_documents=cfg.file_document_paths,
+            internal_origins=cfg.internal_request_origins,
         )
-        await _install_websocket_block(context)
+        websocket_status = await _install_websocket_block(context)
+        if auth_session is not None:
+            await _install_session_storage_seed(context, auth_session.session_storage)
 
         page = await context.new_page()
         # Auth: prefer declarative steps; fall back to script only if no
         # steps file is set (the CLI has already gated --auth-script behind
         # --unsafe-auth-script + cwd containment).
-        if storage_state is None:
+        if auth_session is None:
             if cfg.auth_steps_path is not None:
-                await apply_auth_steps(page, cfg.auth_steps_path)
+                await apply_auth_steps(
+                    page,
+                    cfg.auth_steps_path,
+                    allow_internal=cfg.allow_internal,
+                    allow_file=cfg.allow_file,
+                )
             else:
                 await _maybe_login(page, cfg.auth_script)
 
         await _goto_with_retries(page, cfg.target, cfg.goto_timeout_ms)
-        if cfg.wait_selector:
-            await page.wait_for_selector(cfg.wait_selector, timeout=15_000)
 
         try:
             await page.evaluate("document.fonts && document.fonts.ready")
         except Exception as e:
-            logger.warning("document.fonts.ready missed: %s", e)
+            logger.warning("document.fonts.ready missed: %s", type(e).__name__)
         await page.wait_for_timeout(250)
+
+        expectation_failure = _url_expectation_failure(cfg, str(page.url))
+        if expectation_failure is None and cfg.wait_selector:
+            from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+            try:
+                await page.wait_for_selector(cfg.wait_selector, timeout=15_000)
+            except PlaywrightTimeoutError:
+                expectation_failure = {
+                    "complete": False,
+                    "status": "blocked",
+                    "reason_code": "missing-selector",
+                    "message": "The expected selector was not present on the captured surface.",
+                    "target": redact_url(cfg.target),
+                    "expected_url": redact_url(cfg.expect_url or cfg.target),
+                    "observed_url": redact_url(str(page.url)),
+                    "expected_selector": cfg.wait_selector,
+                }
 
         # Hydration settle: let JS-rendered content paint over skeletons.
         # Real-world testing showed sites like nytimes.com and notion.so capture
-        # gray placeholders without this. 0 = no extra wait.
-        if cfg.settle_ms > 0:
+        # gray placeholders without this. 0 = no extra wait. Preserve the
+        # historical contract by settling after the expected selector resolves.
+        if expectation_failure is None and cfg.settle_ms > 0:
             await page.wait_for_timeout(min(cfg.settle_ms, 30_000))
+            expectation_failure = _url_expectation_failure(cfg, str(page.url))
 
         # Cookie/GDPR banner dismissal: try a closed list of common accept
         # selectors with a 500ms per-selector timeout. Click the first match.
         banner_dismissal = BannerDismissalResult()
-        if cfg.dismiss_banners:
+        if expectation_failure is None and cfg.dismiss_banners:
             banner_dismissal = await _dismiss_common_banners(page)
 
-        for step in state_spec.get("setup_steps", []):
-            await _apply_setup_step(context, page, step)
-        await page.wait_for_timeout(150)
+        if expectation_failure is None:
+            for step in state_spec.get("setup_steps", []):
+                await _apply_setup_step(context, page, step)
+            await page.wait_for_timeout(150)
+            expectation_failure = _url_expectation_failure(cfg, str(page.url))
 
         slug = _slug(cfg.target)
         screen_path = cfg.outdir / "screens" / f"{slug}-{viewport}-{state}.png"
         dom_path = cfg.outdir / "dom" / f"{slug}-{viewport}-{state}.json"
-        screen_path.parent.mkdir(parents=True, exist_ok=True)
-        dom_path.parent.mkdir(parents=True, exist_ok=True)
+        safeio_mod.ensure_output_dir(cfg.outdir, screen_path.parent)
+        safeio_mod.ensure_output_dir(cfg.outdir, dom_path.parent)
 
         # Playwright's page.evaluate has no `timeout` kwarg; wrap with asyncio.wait_for instead.
         dom = await asyncio.wait_for(page.evaluate(INSTRUMENT_JS), timeout=60.0)
         screenshot_options, screenshot_coverage = _screenshot_options(cfg, preset, dom)
-        await page.screenshot(path=str(screen_path), **screenshot_options)
+        screenshot_bytes = await page.screenshot(**screenshot_options)
+        safeio_mod.atomic_write_bytes(cfg.outdir, screen_path, screenshot_bytes)
+        accessibility_name_coverage: dict[str, Any]
         try:
-            await _enrich_accessibility_names(page, dom)
+            accessibility_name_coverage = await _enrich_accessibility_names(page, dom)
         except Exception as e:
             # Browser accessibility enrichment improves semantic accuracy but
             # must not turn a successful visual capture into a failed run.
-            logger.warning("browser accessibility-name enrichment missed: %s", e)
+            logger.warning(
+                "browser accessibility-name enrichment missed: %s",
+                type(e).__name__,
+            )
+            accessibility_name_coverage = {
+                "eligible": 0,
+                "attempted": 0,
+                "enriched": 0,
+                "complete": False,
+                "reason": "accessibility-name-error",
+            }
+        # A route can redirect after the initial readiness checks. Re-check at
+        # the evidence boundary so a screenshot of a late auth/error surface
+        # cannot be declared reviewable.
+        if expectation_failure is None:
+            expectation_failure = _url_expectation_failure(cfg, str(page.url))
+        if expectation_failure is None and cfg.wait_selector:
+            try:
+                selector_visible = await page.locator(cfg.wait_selector).first.is_visible()
+            except Exception:
+                selector_visible = False
+            if not selector_visible:
+                expectation_failure = {
+                    "complete": False,
+                    "status": "blocked",
+                    "reason_code": "missing-selector",
+                    "message": "The expected selector was not present on the captured surface.",
+                    "target": redact_url(cfg.target),
+                    "expected_url": redact_url(cfg.expect_url or cfg.target),
+                    "observed_url": redact_url(str(page.url)),
+                    "expected_selector": cfg.wait_selector,
+                }
         # Redact tokens/fragments from the URL we persist.
         observed_url = dom.get("url")
         if isinstance(observed_url, str):
             dom["url"] = redact_url(observed_url)
         sanitize_dom_payload(dom)
         dom_coverage = dom.get("coverage") or {}
+        visible_elements = dom.get("elements")
+        surface = dom.get("surface") if isinstance(dom.get("surface"), dict) else {}
+        rendered_surface = (
+            (isinstance(visible_elements, list) and bool(visible_elements))
+            or (
+                isinstance(surface.get("body_text_chars"), (int, float))
+                and not isinstance(surface.get("body_text_chars"), bool)
+                and float(surface["body_text_chars"]) > 0
+            )
+            or surface.get("painted_background") is True
+            or surface.get("pseudo_content") is True
+        )
+        empty_surface = not rendered_surface
         combined_coverage = {
             **dom_coverage,
             "complete": bool(dom_coverage.get("complete", True))
-            and bool(screenshot_coverage.get("complete", True)),
+            and bool(screenshot_coverage.get("complete", True))
+            and bool(accessibility_name_coverage.get("complete"))
+            and websocket_status["attempted"] == 0
+            and not empty_surface
+            and expectation_failure is None,
             "dom": dom_coverage,
             "screenshot": screenshot_coverage,
+            "accessibility_names": accessibility_name_coverage,
+            "expectation": expectation_failure
+            or {
+                "complete": True,
+                "status": "matched",
+                "reason_code": None,
+                "target": redact_url(cfg.target),
+                "expected_url": redact_url(cfg.expect_url or cfg.target),
+                "observed_url": redact_url(str(page.url)),
+                "expected_selector": cfg.wait_selector,
+            },
         }
+        combined_coverage["reason"] = (
+            (expectation_failure or {}).get("reason_code")
+            or ("empty-surface" if empty_surface else None)
+            or ("websockets-blocked" if websocket_status["attempted"] else None)
+            or accessibility_name_coverage.get("reason")
+            or dom_coverage.get("reason")
+            or screenshot_coverage.get("reason")
+        )
         if not combined_coverage["complete"]:
             logger.warning(
                 "capture coverage is partial for %s/%s: %s",
                 viewport,
                 state,
-                screenshot_coverage.get("reason") or dom_coverage.get("reason"),
+                combined_coverage.get("reason"),
             )
         dom["coverage"] = combined_coverage
         dom["meta"] = {
@@ -1904,17 +2666,53 @@ async def _capture_one(
             "viewport_size": preset,
             "state": state,
             "screen_path": str(screen_path.relative_to(cfg.outdir)),
-            "manual_review_needed": bool(state_spec.get("manual_review_needed", False)),
+            "manual_review_needed": bool(state_spec.get("manual_review_needed", False))
+            or websocket_status["attempted"] > 0
+            or empty_surface
+            or not bool(accessibility_name_coverage.get("complete")),
             "target": redact_url(cfg.target),
             "truncated": bool(dom.get("truncated", False)),
             "coverage": combined_coverage,
-            "websockets_blocked": True,
+            "websockets_blocked": {
+                "policy": True,
+                "attempted": websocket_status["attempted"],
+            },
+            "empty_surface": empty_surface,
             "banner_dismissal": {
                 "requested": cfg.dismiss_banners,
                 **banner_dismissal.to_dict(),
             },
         }
-        dom_path.write_text(json.dumps(dom, indent=2), encoding="utf-8")
+        safeio_mod.atomic_write_text(
+            cfg.outdir,
+            dom_path,
+            json.dumps(dom, indent=2),
+            encoding="utf-8",
+        )
+
+        if expectation_failure is not None:
+            expected_selector = expectation_failure.get("expected_selector")
+            selector_detail = (
+                f" Expected selector {expected_selector!r}."
+                if isinstance(expected_selector, str)
+                else ""
+            )
+            raise CaptureBlocked(
+                reason_code=str(expectation_failure["reason_code"]),
+                message=(
+                    f"{expectation_failure['message']} "
+                    f"Expected {expectation_failure['expected_url']}; "
+                    f"observed {expectation_failure['observed_url']}."
+                    f"{selector_detail}"
+                ),
+                screen_path=screen_path,
+                dom_path=dom_path,
+                expected_url=str(expectation_failure["expected_url"]),
+                observed_url=str(expectation_failure["observed_url"]),
+                expected_selector=(
+                    expected_selector if isinstance(expected_selector, str) else None
+                ),
+            )
 
         return screen_path, dom_path
     finally:
@@ -1961,6 +2759,79 @@ def _validate_requested_matrix(
             )
 
 
+def preflight(
+    cfg: CaptureConfig,
+) -> tuple[dict[str, dict[str, int]], dict[str, dict[str, Any]]]:
+    """Validate a capture completely without creating or deleting artifacts."""
+    validate_target(
+        cfg.target,
+        allow_internal=cfg.allow_internal,
+        allow_file=cfg.allow_file,
+    )
+    _validate_capture_expectations(cfg)
+    if cfg.allow_origins and not cfg.allow_internal:
+        raise ValueError("--allow-origin requires --allow-internal")
+    for origin_url in cfg.allow_origins:
+        network_origin(origin_url, require_origin_only=True)
+        validate_target(origin_url, allow_internal=True)
+    if cfg.expect_url is not None and "*" not in cfg.expect_url:
+        validate_target(
+            cfg.expect_url,
+            allow_internal=cfg.allow_internal,
+            allow_file=cfg.allow_file,
+        )
+    auth_modes = sum(
+        (
+            cfg.auth_steps_path is not None,
+            cfg.auth_script is not None,
+            cfg.interactive_auth,
+        )
+    )
+    if auth_modes > 1:
+        raise ValueError(
+            "choose exactly one authentication mode: auth steps, auth script, or interactive auth"
+        )
+    if cfg.interactive_auth and not _interactive_terminal_available():
+        raise ValueError(
+            "--interactive-auth requires an interactive terminal; "
+            "use --auth-steps for unattended or agent-driven capture"
+        )
+    auth_steps: list[dict[str, Any]] | None = None
+    if cfg.auth_steps_path is not None:
+        auth_steps = load_and_validate_auth_steps(
+            cfg.auth_steps_path,
+            allow_internal=cfg.allow_internal,
+            allow_file=cfg.allow_file,
+        )
+        _validate_auth_environment(auth_steps)
+    if cfg.auth_script is not None and not cfg.auth_script.is_file():
+        raise ValueError(f"auth script not found: {cfg.auth_script}")
+
+    presets = load_viewport_presets(cfg.viewport_config)
+    states = load_states(cfg.states_config)
+    _validate_requested_matrix(cfg, presets, states)
+    if cfg.allow_file:
+        cfg.file_request_roots, cfg.file_document_paths = _derive_file_request_policy(
+            cfg.target,
+            cfg.expect_url,
+            auth_steps,
+        )
+    else:
+        cfg.file_request_roots = ()
+        cfg.file_document_paths = ()
+    cfg.internal_request_origins = (
+        _derive_internal_request_origins(
+            cfg.target,
+            cfg.expect_url,
+            auth_steps,
+            cfg.allow_origins,
+        )
+        if cfg.allow_internal
+        else ()
+    )
+    return presets, states
+
+
 async def _run_async(cfg: CaptureConfig) -> None:
     try:
         from playwright.async_api import Error as PlaywrightError
@@ -1971,35 +2842,36 @@ async def _run_async(cfg: CaptureConfig) -> None:
             "  pip install playwright && playwright install chromium"
         ) from e
 
-    # Fail fast if the target is unsafe.
-    validate_target(
-        cfg.target,
-        allow_internal=cfg.allow_internal,
-        allow_file=cfg.allow_file,
-    )
+    presets, states = preflight(cfg)
 
-    # Fail fast on auth-steps too: load + parse + schema-validate BEFORE
-    # spending the ~1 s it takes to spin up Chromium. The same function
-    # gets called again from inside apply_auth_steps; pre-validating here
-    # just surfaces bad input earlier and avoids the browser cold start.
-    if cfg.auth_steps_path is not None:
-        load_and_validate_auth_steps(cfg.auth_steps_path)
-
-    presets = load_viewport_presets(cfg.viewport_config)
-    states = load_states(cfg.states_config)
-    _validate_requested_matrix(cfg, presets, states)
-
-    cfg.outdir.mkdir(parents=True, exist_ok=True)
+    safeio_mod.ensure_output_dir(cfg.outdir, cfg.outdir)
     sem = asyncio.Semaphore(_concurrency())
 
     async with async_playwright() as pw:
         try:
-            browser = await pw.chromium.launch(headless=True)
+            browser = await pw.chromium.launch(headless=not cfg.interactive_auth)
         except PlaywrightError as exc:
             raise CaptureFailure(_browser_launch_failure_message(exc)) from None
         try:
-            storage_state = await _prepare_auth_storage_state(browser, cfg, presets)
+            try:
+                auth_session = await _prepare_auth_storage_state(browser, cfg, presets)
+            except Exception as exc:
+                # Playwright includes the full navigation URL in many errors.
+                # Authentication URLs routinely carry OAuth codes, signed
+                # callbacks, or session tokens, so never forward the raw
+                # exception through the CLI's traceback handler.
+                logger.error("browser authentication failed: %s", type(exc).__name__)
+                raise CaptureFailure(
+                    "browser authentication failed; no capture artifacts were written"
+                ) from None
             pairs: list[tuple[str, str]] = [(vp, st) for vp in cfg.viewports for st in cfg.states]
+            in_progress_path = cfg.outdir / artifacts_mod.CAPTURE_IN_PROGRESS_FILENAME
+            safeio_mod.atomic_write_text(
+                cfg.outdir,
+                in_progress_path,
+                '{"schema_version":1,"status":"capture-in-progress"}\n',
+                encoding="utf-8",
+            )
 
             async def _one(viewport: str, state: str) -> tuple[Path, Path]:
                 async with sem:
@@ -2011,7 +2883,7 @@ async def _run_async(cfg: CaptureConfig) -> None:
                         states,
                         viewport,
                         state,
-                        storage_state,
+                        auth_session,
                     )
 
             tasks = [
@@ -2020,10 +2892,28 @@ async def _run_async(cfg: CaptureConfig) -> None:
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             succeeded: list[dict[str, str]] = []
-            failures: list[tuple[str, str, str]] = []
+            failures: list[dict[str, Any]] = []
             for (vp, st), res in zip(pairs, results, strict=True):
                 if isinstance(res, BaseException):
-                    failures.append((vp, st, f"{type(res).__name__}: {res}"))
+                    failure: dict[str, Any] = {
+                        "viewport": vp,
+                        "state": st,
+                        "reason": f"{type(res).__name__}: browser capture failed",
+                        "reason_code": "capture-error",
+                    }
+                    if isinstance(res, CaptureBlocked):
+                        failure.update(
+                            {
+                                "reason_code": res.reason_code,
+                                "screen": str(res.screen_path.relative_to(cfg.outdir)),
+                                "dom": str(res.dom_path.relative_to(cfg.outdir)),
+                                "diagnostic_only": True,
+                                "expected_url": res.expected_url,
+                                "observed_url": res.observed_url,
+                                "expected_selector": res.expected_selector,
+                            }
+                        )
+                    failures.append(failure)
                 else:
                     screen_path, dom_path = res
                     succeeded.append(
@@ -2040,22 +2930,33 @@ async def _run_async(cfg: CaptureConfig) -> None:
                 "target": redact_url(cfg.target),
                 "requested": [{"viewport": viewport, "state": state} for viewport, state in pairs],
                 "succeeded": succeeded,
-                "failures": [
-                    {"viewport": vp, "state": st, "reason": reason} for vp, st, reason in failures
-                ],
-                "complete": not failures and len(succeeded) == total,
+                "failures": failures,
             }
-            (cfg.outdir / "capture-manifest.json").write_text(
-                json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+            manifest = artifacts_mod.validate_capture_manifest(cfg.outdir, manifest)
+            safeio_mod.atomic_write_text(
+                cfg.outdir,
+                cfg.outdir / "capture-manifest.json",
+                json.dumps(manifest, indent=2) + "\n",
+                encoding="utf-8",
             )
+            # The manifest is the commit record for the capture. Remove the
+            # marker only after its atomic installation; interrupted runs keep
+            # the marker so current partial artifacts cannot be mistaken for
+            # compatible manifest-less legacy evidence.
+            safeio_mod.remove_output_file(cfg.outdir, in_progress_path)
             logger.info(
                 "captured %d/%d (%d failures)",
                 len(succeeded),
                 total,
                 len(failures),
             )
-            for vp, st, reason in failures:
-                logger.error("  failed %s/%s: %s", vp, st, reason)
+            for failure in failures:
+                logger.error(
+                    "  failed %s/%s: %s",
+                    failure["viewport"],
+                    failure["state"],
+                    failure["reason"],
+                )
             if failures or len(succeeded) != total:
                 raise CaptureFailure(
                     f"capture incomplete: {len(succeeded)}/{total} succeeded; "

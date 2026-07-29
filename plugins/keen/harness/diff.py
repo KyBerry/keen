@@ -14,9 +14,10 @@ measurement.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
+
+from harness import _artifacts as artifacts_mod
 
 
 def _capture_scope(component: dict[str, Any]) -> str:
@@ -34,8 +35,7 @@ def _component_index(component: dict[str, Any]) -> Any:
     return component.get("component_index", "")
 
 
-def _load_findings(run_dir: Path) -> dict[str, dict[str, Any]]:
-    report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+def _load_findings(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for c in report.get("components", []):
         capture_scope = _capture_scope(c)
@@ -69,16 +69,15 @@ def _load_findings(run_dir: Path) -> dict[str, dict[str, Any]]:
 
 
 def diff_runs(run_a: Path, run_b: Path) -> dict[str, Any]:
-    a = _load_findings(run_a)
-    b = _load_findings(run_b)
+    rep_a = artifacts_mod.read_report_document(run_a / "report.json")
+    rep_b = artifacts_mod.read_report_document(run_b / "report.json")
+    a = _load_findings(rep_a)
+    b = _load_findings(rep_b)
     a_keys, b_keys = set(a), set(b)
 
     added = [b[k] for k in sorted(b_keys - a_keys)]
     removed = [a[k] for k in sorted(a_keys - b_keys)]
     unchanged = [b[k] for k in sorted(b_keys & a_keys)]
-
-    rep_a = json.loads((run_a / "report.json").read_text(encoding="utf-8"))
-    rep_b = json.loads((run_b / "report.json").read_text(encoding="utf-8"))
 
     return {
         "run_a": str(run_a),

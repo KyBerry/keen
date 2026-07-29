@@ -35,6 +35,8 @@ from harness import (
     __version__,
     _timing,
 )
+from harness import _artifacts as artifacts_mod
+from harness import _safeio as safeio_mod
 from harness import analyze as analyze_mod
 from harness import capture as capture_mod
 from harness import decompose as decompose_mod
@@ -244,9 +246,22 @@ def _add_capture_args(p: argparse.ArgumentParser) -> None:
         help="Capture the full scrollable page (default; use --no-full-page for viewport only).",
     )
     p.add_argument(
+        "--expect-selector",
         "--wait-selector",
+        dest="wait_selector",
         default=None,
-        help="CSS selector to wait for before capturing (for SPAs).",
+        help=(
+            "Require this CSS selector on the final page before review. "
+            "--wait-selector remains as a compatibility alias."
+        ),
+    )
+    p.add_argument(
+        "--expect-url",
+        default=None,
+        help=(
+            "Require this final URL or URL glob. By default Keen expects the requested "
+            "origin/path and blocks material redirects."
+        ),
     )
     # --auth-steps and --auth-script are mutually exclusive: pick one mechanism.
     # --auth-steps is the preferred path (declarative JSON DSL, no code exec).
@@ -263,6 +278,15 @@ def _add_capture_args(p: argparse.ArgumentParser) -> None:
             "Path to a Python file exposing async login(page). "
             "WARNING: executes arbitrary Python; requires --unsafe-auth-script. "
             "Review the file before passing."
+        ),
+    )
+    auth_group.add_argument(
+        "--interactive-auth",
+        action="store_true",
+        default=False,
+        help=(
+            "Open headed Chromium for one-time user sign-in; Keen does not write session "
+            "state to review artifacts. Requires an interactive terminal."
         ),
     )
     p.add_argument(
@@ -292,8 +316,19 @@ def _add_capture_args(p: argparse.ArgumentParser) -> None:
         action="store_true",
         default=False,
         help=(
-            "Permit targets that resolve to private/loopback/link-local IPs. "
-            "Default false: such targets are rejected as SSRF risk."
+            "Permit explicitly requested origins that resolve to "
+            "private/loopback/link-local IPs. Default false."
+        ),
+    )
+    p.add_argument(
+        "--allow-origin",
+        dest="allow_origins",
+        action="append",
+        default=[],
+        metavar="ORIGIN",
+        help=(
+            "Additional exact internal origin needed by the reviewed app, such as "
+            "http://127.0.0.1:8787. Repeat as needed; requires --allow-internal."
         ),
     )
     p.add_argument(
@@ -345,14 +380,18 @@ _GENERATED_CAPTURE_ENTRIES = (
     "taste.json",
     "taste.md",
     "capture-manifest.json",
+    artifacts_mod.CAPTURE_IN_PROGRESS_FILENAME,
 )
 
 
 def _prepare_capture_outdir(outdir: Path, *, overwrite: bool) -> None:
     """Prevent stale artifacts from leaking into a new capture run."""
-    if outdir.is_symlink():
-        raise SystemExit(f"refusing symlink output directory: {outdir}")
-    existing = [outdir / name for name in _GENERATED_CAPTURE_ENTRIES if (outdir / name).exists()]
+    safeio_mod.ensure_output_dir(outdir, outdir)
+    existing = [
+        outdir / name
+        for name in _GENERATED_CAPTURE_ENTRIES
+        if (outdir / name).exists() or (outdir / name).is_symlink()
+    ]
     if existing and not overwrite:
         names = ", ".join(path.name for path in existing[:5])
         logger.error(
@@ -362,17 +401,18 @@ def _prepare_capture_outdir(outdir: Path, *, overwrite: bool) -> None:
         raise SystemExit(2)
     if overwrite:
         for path in existing:
-            if path.is_symlink() or path.is_file():
+            if safeio_mod.is_linklike(path) or path.is_file():
                 path.unlink()
             elif path.is_dir():
                 shutil.rmtree(path)
-    outdir.mkdir(parents=True, exist_ok=True)
 
 
 def _do_capture(args: argparse.Namespace, outdir: Path) -> Path:
-    _prepare_capture_outdir(outdir, overwrite=bool(getattr(args, "overwrite", False)))
     auth_steps_path = _resolve_auth_steps(args)
-    auth_path = None if auth_steps_path is not None else _resolve_auth_script(args)
+    interactive_auth = bool(getattr(args, "interactive_auth", False))
+    auth_path = (
+        None if auth_steps_path is not None or interactive_auth else _resolve_auth_script(args)
+    )
     settle_ms = int(getattr(args, "settle_ms", 0))
     goto_timeout = float(getattr(args, "goto_timeout", 30.0))
     if not 0 <= settle_ms <= 30_000:
@@ -387,25 +427,63 @@ def _do_capture(args: argparse.Namespace, outdir: Path) -> Path:
         states=_csv(args.states),
         full_page=args.full_page,
         wait_selector=args.wait_selector,
+        expect_url=getattr(args, "expect_url", None),
         auth_steps_path=auth_steps_path,
         auth_script=auth_path,
+        interactive_auth=interactive_auth,
         outdir=outdir,
         viewport_config=Path(args.viewport_config) if args.viewport_config else None,
         states_config=Path(args.states_config) if args.states_config else None,
         allow_internal=getattr(args, "allow_internal", False),
+        allow_origins=list(getattr(args, "allow_origins", [])),
         allow_file=getattr(args, "allow_file", False),
         goto_timeout_ms=int(goto_timeout * 1000),
         settle_ms=settle_ms,
         dismiss_banners=bool(getattr(args, "dismiss_banners", False)),
     )
+    # Complete every side-effect-free validation before --overwrite removes a
+    # previous run. A typo in an expectation or auth path must not destroy
+    # useful evidence.
+    try:
+        capture_mod.preflight(cfg)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from None
+    _prepare_capture_outdir(outdir, overwrite=bool(getattr(args, "overwrite", False)))
     try:
         capture_mod.run(cfg)
     except (ValueError, capture_mod.CaptureFailure) as e:
         # Surface SSRF / config validation errors as clean CLI failures (exit 1)
         # rather than letting an asyncio traceback bubble out.
+        brief_path = report_mod.write_capture_failure_brief(outdir)
+        if brief_path is not None:
+            logger.error("capture is not reviewable; see %s", brief_path)
         logger.error("%s", e)
         raise SystemExit(1) from None
     return outdir
+
+
+def _require_reviewable_capture(captures_dir: Path) -> None:
+    """Refuse to audit untrusted, stale, or diagnostic-only capture evidence."""
+    if not artifacts_mod.capture_manifest_present(captures_dir) and not any(
+        (captures_dir / "dom").glob("*.json")
+    ):
+        # Report-only inputs used by diff/intent predate the capture contract.
+        return
+    try:
+        evidence = artifacts_mod.capture_evidence(captures_dir)
+    except artifacts_mod.ArtifactIntegrityError as exc:
+        report_mod.write_capture_failure_brief(captures_dir)
+        logger.error("capture integrity failed: %s; refusing analysis", exc)
+        raise SystemExit(1) from None
+    if evidence.reviewable:
+        return
+    report_mod.write_capture_failure_brief(captures_dir)
+    logger.error(
+        "capture status is %s; diagnostic artifacts cannot be audited or scored",
+        evidence.status,
+    )
+    raise SystemExit(1)
 
 
 def _focus_coverage_for(captures_dir: Path, dom_filename: str) -> dict[str, int]:
@@ -413,9 +491,9 @@ def _focus_coverage_for(captures_dir: Path, dom_filename: str) -> dict[str, int]
     if not dom_path.exists():
         return {}
     try:
-        data = json.loads(dom_path.read_text(encoding="utf-8"))
+        data = artifacts_mod.read_dom_document(dom_path)
         return data.get("focus_coverage", {}) or {}
-    except (OSError, json.JSONDecodeError) as e:
+    except artifacts_mod.ArtifactIntegrityError as e:
         logger.warning("could not read focus_coverage from %s: %s", dom_path, e)
         return {}
 
@@ -424,15 +502,25 @@ def _do_decompose(captures_dir: Path) -> list[Path]:
     """Decompose every dom/*.json under captures_dir; write to components/."""
     written: list[Path] = []
     components_dir = captures_dir / "components"
-    components_dir.mkdir(parents=True, exist_ok=True)
-    dom_dir = captures_dir / "dom"
-    if not dom_dir.exists():
-        return written
-    for dom_path in sorted(dom_dir.glob("*.json")):
+    safeio_mod.ensure_output_dir(captures_dir, components_dir)
+    try:
+        evidence = artifacts_mod.capture_evidence(captures_dir)
+    except artifacts_mod.ArtifactIntegrityError as exc:
+        logger.error("capture integrity failed: %s", exc)
+        raise SystemExit(1) from None
+    for dom_path in evidence.dom_paths:
+        try:
+            dom = artifacts_mod.read_dom_document(dom_path)
+        except artifacts_mod.ArtifactIntegrityError as exc:
+            logger.error("cannot read DOM artifact %s: %s", dom_path, exc)
+            raise SystemExit(1) from None
         components_path = components_dir / dom_path.name
-        components = decompose_mod.decompose(dom_path)
-        components_path.write_text(
-            json.dumps([c.to_dict() for c in components], indent=2), encoding="utf-8"
+        components = decompose_mod.decompose_document(dom)
+        safeio_mod.atomic_write_text(
+            captures_dir,
+            components_path,
+            json.dumps([c.to_dict() for c in components], indent=2),
+            encoding="utf-8",
         )
         written.append(components_path)
     return written
@@ -442,11 +530,14 @@ def _do_analyze(captures_dir: Path, target_system: str | None) -> list[Path]:
     """Analyze every components/*.json; write to analysis/."""
     written: list[Path] = []
     analysis_dir = captures_dir / "analysis"
-    analysis_dir.mkdir(parents=True, exist_ok=True)
-    components_dir = captures_dir / "components"
-    if not components_dir.exists():
-        return written
-    for components_path in sorted(components_dir.glob("*.json")):
+    safeio_mod.ensure_output_dir(captures_dir, analysis_dir)
+    try:
+        evidence = artifacts_mod.capture_evidence(captures_dir)
+        component_paths = artifacts_mod.stage_paths(captures_dir, "components", evidence.dom_paths)
+    except artifacts_mod.ArtifactIntegrityError as exc:
+        logger.error("capture integrity failed: %s", exc)
+        raise SystemExit(1) from None
+    for components_path in component_paths:
         analysis_path = analysis_dir / components_path.name
         focus_cov = _focus_coverage_for(captures_dir, components_path.name)
         analysis = analyze_mod.analyze_file(
@@ -455,7 +546,12 @@ def _do_analyze(captures_dir: Path, target_system: str | None) -> list[Path]:
             captures_dir=captures_dir,
             focus_coverage=focus_cov,
         )
-        analysis_path.write_text(json.dumps(analysis, indent=2), encoding="utf-8")
+        safeio_mod.atomic_write_text(
+            captures_dir,
+            analysis_path,
+            json.dumps(analysis, indent=2),
+            encoding="utf-8",
+        )
         written.append(analysis_path)
     return written
 
@@ -464,8 +560,18 @@ def _write_slop(captures_dir: Path) -> Path:
     """Compute the slop report for a run dir and write slop.json + slop.md."""
     sr = slop_mod.analyze_slop(captures_dir)
     out_json = captures_dir / "slop.json"
-    out_json.write_text(json.dumps(sr.to_dict(), indent=2) + "\n", encoding="utf-8")
-    (captures_dir / "slop.md").write_text(slop_mod.render_markdown(sr), encoding="utf-8")
+    safeio_mod.atomic_write_text(
+        captures_dir,
+        out_json,
+        json.dumps(sr.to_dict(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    safeio_mod.atomic_write_text(
+        captures_dir,
+        captures_dir / "slop.md",
+        slop_mod.render_markdown(sr),
+        encoding="utf-8",
+    )
     logger.info("slop: score=%s (%s) → %s", sr.score, sr.band, out_json.relative_to(captures_dir))
     return out_json
 
@@ -474,8 +580,18 @@ def _write_taste(captures_dir: Path) -> Path:
     """Compute the taste DNA vector for a run dir and write taste.json + taste.md."""
     vec = taste_mod.extract_taste(captures_dir)
     out_json = captures_dir / "taste.json"
-    out_json.write_text(json.dumps(vec.to_dict(), indent=2) + "\n", encoding="utf-8")
-    (captures_dir / "taste.md").write_text(taste_mod.render_taste_card(vec), encoding="utf-8")
+    safeio_mod.atomic_write_text(
+        captures_dir,
+        out_json,
+        json.dumps(vec.to_dict(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    safeio_mod.atomic_write_text(
+        captures_dir,
+        captures_dir / "taste.md",
+        taste_mod.render_taste_card(vec),
+        encoding="utf-8",
+    )
     logger.info(
         "taste: archetype=%s temperature=%s distinctiveness=%s",
         vec.archetype_hint,
@@ -487,20 +603,37 @@ def _write_taste(captures_dir: Path) -> Path:
 
 def _do_tokens(captures_dir: Path, target_system: str | None) -> Path:
     tokens_dir = captures_dir / "tokens"
-    tokens_dir.mkdir(parents=True, exist_ok=True)
+    safeio_mod.ensure_output_dir(captures_dir, tokens_dir)
     detected = tokens_mod.extract_from_captures(captures_dir)
     extracted_path = tokens_dir / "extracted.json"
-    extracted_path.write_text(json.dumps(detected, indent=2), encoding="utf-8")
+    safeio_mod.atomic_write_text(
+        captures_dir,
+        extracted_path,
+        json.dumps(detected, indent=2),
+        encoding="utf-8",
+    )
     if target_system:
         try:
             drift = tokens_mod.compare_to_system(detected, target_system)
-            (tokens_dir / "comparison.json").write_text(
-                json.dumps(drift, indent=2), encoding="utf-8"
+            safeio_mod.atomic_write_text(
+                captures_dir,
+                tokens_dir / "comparison.json",
+                json.dumps(drift, indent=2),
+                encoding="utf-8",
             )
-            (tokens_dir / "drift.md").write_text(tokens_mod.render_drift(drift), encoding="utf-8")
+            safeio_mod.atomic_write_text(
+                captures_dir,
+                tokens_dir / "drift.md",
+                tokens_mod.render_drift(drift),
+                encoding="utf-8",
+            )
         except ValueError as e:
             logger.error("tokens: could not compare to system: %s", e)
-    tokens_mod.write_palette(detected, tokens_dir / "palette.png")
+    tokens_mod.write_palette(
+        detected,
+        tokens_dir / "palette.png",
+        output_root=captures_dir,
+    )
     return extracted_path
 
 
@@ -510,7 +643,7 @@ def _do_tokens(captures_dir: Path, target_system: str | None) -> Path:
 def cmd_review(args: argparse.Namespace) -> int:
     target_system = validate_system(args.against)
     outdir = Path(args.out) if args.out else _default_outdir("review")
-    outdir.mkdir(parents=True, exist_ok=True)
+    safeio_mod.ensure_output_dir(outdir, outdir)
 
     logger.info("capture target=%s -> %s", redact_url(args.target), outdir)
     with stage("capture"):
@@ -533,8 +666,18 @@ def cmd_review(args: argparse.Namespace) -> int:
     logger.info("report: composing")
     with stage("report"):
         rep = report_mod.compose(outdir, target_system=target_system)
-        (outdir / "report.json").write_text(json.dumps(rep, indent=2), encoding="utf-8")
-        (outdir / "summary.md").write_text(report_mod.render_summary(rep), encoding="utf-8")
+        safeio_mod.atomic_write_text(
+            outdir,
+            outdir / "report.json",
+            json.dumps(rep, indent=2),
+            encoding="utf-8",
+        )
+        safeio_mod.atomic_write_text(
+            outdir,
+            outdir / "summary.md",
+            report_mod.render_summary(rep),
+            encoding="utf-8",
+        )
 
     if getattr(args, "characterize", False):
         logger.info("characterization: measuring AI-default and visual-language signals")
@@ -575,6 +718,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
         raise SystemExit(2)
 
     captures_dir = target if target.is_dir() else target.parent
+    _require_reviewable_capture(captures_dir)
     with stage("decompose"):
         _do_decompose(captures_dir)
     with stage("tokens"):
@@ -583,8 +727,18 @@ def cmd_audit(args: argparse.Namespace) -> int:
         _do_analyze(captures_dir, target_system=target_system)
     with stage("report"):
         rep = report_mod.compose(captures_dir, target_system=target_system)
-        (captures_dir / "report.json").write_text(json.dumps(rep, indent=2), encoding="utf-8")
-        (captures_dir / "summary.md").write_text(report_mod.render_summary(rep), encoding="utf-8")
+        safeio_mod.atomic_write_text(
+            captures_dir,
+            captures_dir / "report.json",
+            json.dumps(rep, indent=2),
+            encoding="utf-8",
+        )
+        safeio_mod.atomic_write_text(
+            captures_dir,
+            captures_dir / "summary.md",
+            report_mod.render_summary(rep),
+            encoding="utf-8",
+        )
     if getattr(args, "characterize", False):
         with stage("slop"):
             _write_slop(captures_dir)
@@ -601,9 +755,11 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
 def cmd_tokens(args: argparse.Namespace) -> int:
     target_system = validate_system(args.against)
-    outdir = Path(args.out) if args.out else _default_outdir("tokens")
-    outdir.mkdir(parents=True, exist_ok=True)
     src = Path(args.target)
+    if src.is_dir():
+        _require_reviewable_capture(src)
+    outdir = Path(args.out) if args.out else _default_outdir("tokens")
+    safeio_mod.ensure_output_dir(outdir, outdir)
 
     with stage("tokens"):
         if src.is_file():
@@ -612,20 +768,35 @@ def cmd_tokens(args: argparse.Namespace) -> int:
             detected = tokens_mod.extract_from_captures(src)
 
         tokens_dir = outdir / "tokens"
-        tokens_dir.mkdir(parents=True, exist_ok=True)
-        (tokens_dir / "extracted.json").write_text(json.dumps(detected, indent=2), encoding="utf-8")
+        safeio_mod.ensure_output_dir(outdir, tokens_dir)
+        safeio_mod.atomic_write_text(
+            outdir,
+            tokens_dir / "extracted.json",
+            json.dumps(detected, indent=2),
+            encoding="utf-8",
+        )
         if target_system:
             try:
                 drift = tokens_mod.compare_to_system(detected, target_system)
-                (tokens_dir / "comparison.json").write_text(
-                    json.dumps(drift, indent=2), encoding="utf-8"
+                safeio_mod.atomic_write_text(
+                    outdir,
+                    tokens_dir / "comparison.json",
+                    json.dumps(drift, indent=2),
+                    encoding="utf-8",
                 )
-                (tokens_dir / "drift.md").write_text(
-                    tokens_mod.render_drift(drift), encoding="utf-8"
+                safeio_mod.atomic_write_text(
+                    outdir,
+                    tokens_dir / "drift.md",
+                    tokens_mod.render_drift(drift),
+                    encoding="utf-8",
                 )
             except ValueError as e:
                 logger.error("tokens: %s", e)
-        tokens_mod.write_palette(detected, tokens_dir / "palette.png")
+        tokens_mod.write_palette(
+            detected,
+            tokens_dir / "palette.png",
+            output_root=outdir,
+        )
     logger.info("tokens written to %s", tokens_dir)
     return 0
 
@@ -652,10 +823,20 @@ def cmd_context_init(args: argparse.Namespace) -> int:
     except ValueError as exc:
         logger.error("context init: %s", exc)
         raise SystemExit(2) from exc
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    safeio_mod.ensure_output_dir(path.parent, path.parent)
+    safeio_mod.atomic_write_text(
+        path.parent,
+        path,
+        json.dumps(payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
     direction_path = path.parent / context_mod.DIRECTION_FILENAME
-    direction_path.write_text(context_mod.render_direction(payload), encoding="utf-8")
+    safeio_mod.atomic_write_text(
+        path.parent,
+        direction_path,
+        context_mod.render_direction(payload),
+        encoding="utf-8",
+    )
     logger.info("design context written to %s", path)
     logger.info("human direction written to %s", direction_path)
     return 0
@@ -697,7 +878,12 @@ def cmd_context_render(args: argparse.Namespace) -> int:
     if direction_path.is_symlink():
         logger.error("refusing symlink direction output: %s", direction_path)
         return 2
-    direction_path.write_text(context_mod.render_direction(payload), encoding="utf-8")
+    safeio_mod.atomic_write_text(
+        path.parent,
+        direction_path,
+        context_mod.render_direction(payload),
+        encoding="utf-8",
+    )
     logger.info("human direction written to %s", direction_path)
     return 0
 
@@ -764,8 +950,12 @@ def cmd_workshop_summarize(args: argparse.Namespace) -> int:
                 destination,
             )
             return 2
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(rendered, encoding="utf-8")
+        safeio_mod.atomic_write_text(
+            destination.parent,
+            destination,
+            rendered,
+            encoding="utf-8",
+        )
         logger.info("workshop handoff written to %s", destination)
     else:
         print(rendered, end="")
@@ -796,6 +986,7 @@ def cmd_systemize(args: argparse.Namespace) -> int:
     if not run_dir.exists():
         logger.error("run directory does not exist: %s", run_dir)
         raise SystemExit(2)
+    _require_reviewable_capture(run_dir)
     with stage("systemize"):
         result = systemize_module.systemize_run(run_dir, name=args.name)
     logger.info("proposed system '%s' written to:", args.name)
@@ -834,12 +1025,23 @@ def cmd_diff(args: argparse.Namespace) -> int:
 
     a, b = Path(args.run_a), Path(args.run_b)
     for label, path in [("run_a", a), ("run_b", b)]:
-        if not (path / "report.json").exists():
+        _require_reviewable_capture(path)
+        report_path = path / "report.json"
+        if not report_path.exists() and not report_path.is_symlink():
             logger.error("%s has no report.json: %s", label, path)
             raise SystemExit(2)
     out_path = Path(args.out) if args.out else (b / "diff.md")
-    result = diff_module.diff_runs(a, b)
-    out_path.write_text(diff_module.render_markdown(result), encoding="utf-8")
+    try:
+        result = diff_module.diff_runs(a, b)
+    except artifacts_mod.ArtifactIntegrityError as exc:
+        logger.error("diff report integrity failed: %s", exc)
+        raise SystemExit(1) from None
+    safeio_mod.atomic_write_text(
+        out_path.parent,
+        out_path,
+        diff_module.render_markdown(result),
+        encoding="utf-8",
+    )
     logger.info("diff written to %s", out_path)
     logger.info(
         "  +%d added, -%d removed, =%d unchanged",
@@ -877,10 +1079,19 @@ def cmd_intent(args: argparse.Namespace) -> int:
         print(json.dumps(out, indent=2))
         return 0
 
-    if not (target / "report.json").exists():
+    _require_reviewable_capture(target)
+    report_path = target / "report.json"
+    if not report_path.exists() and not report_path.is_symlink():
         logger.error("no report.json under %s", target)
         raise SystemExit(2)
-    report = json.loads((target / "report.json").read_text(encoding="utf-8"))
+    try:
+        report = artifacts_mod.read_report_document(
+            report_path,
+            require_scored=False,
+        )
+    except artifacts_mod.ArtifactIntegrityError as exc:
+        logger.error("intent report integrity failed: %s", exc)
+        raise SystemExit(1) from None
     captures = report.get("captures", [])
     annotated = report.get("annotated_overviews", {})
     top = report.get("top_findings", [])
@@ -916,6 +1127,7 @@ def cmd_taste(args: argparse.Namespace) -> int:
     if not captures_dir.exists():
         logger.error("%s does not exist", captures_dir)
         raise SystemExit(2)
+    _require_reviewable_capture(captures_dir)
     if not (captures_dir / "components").exists():
         logger.error(
             "%s has no components/ subdirectory; run `keen review` or "
@@ -925,10 +1137,18 @@ def cmd_taste(args: argparse.Namespace) -> int:
         raise SystemExit(2)
     vec = taste_mod.extract_taste(captures_dir)
     card = taste_mod.render_taste_card(vec)
-    (captures_dir / "taste.json").write_text(
-        json.dumps(vec.to_dict(), indent=2) + "\n", encoding="utf-8"
+    safeio_mod.atomic_write_text(
+        captures_dir,
+        captures_dir / "taste.json",
+        json.dumps(vec.to_dict(), indent=2) + "\n",
+        encoding="utf-8",
     )
-    (captures_dir / "taste.md").write_text(card, encoding="utf-8")
+    safeio_mod.atomic_write_text(
+        captures_dir,
+        captures_dir / "taste.md",
+        card,
+        encoding="utf-8",
+    )
     logger.info(
         "taste: archetype=%s temperature=%s distinctiveness=%s",
         vec.archetype_hint,
@@ -952,6 +1172,7 @@ def cmd_slop(args: argparse.Namespace) -> int:
     if not captures_dir.exists():
         logger.error("%s does not exist", captures_dir)
         raise SystemExit(2)
+    _require_reviewable_capture(captures_dir)
     if not (captures_dir / "components").exists():
         logger.error(
             "%s has no components/ subdirectory; run `keen review` or "
@@ -972,7 +1193,7 @@ def cmd_derive_palette(args: argparse.Namespace) -> int:
     from harness.derive_palette import derive, palette_with_contrast
 
     out_dir = Path(args.out) if args.out else Path(".keen") / "palettes" / args.name
-    out_dir.mkdir(parents=True, exist_ok=True)
+    safeio_mod.ensure_output_dir(out_dir, out_dir)
 
     try:
         p = derive(seed=args.seed, strategy=args.strategy, steps=args.steps)
@@ -981,8 +1202,11 @@ def cmd_derive_palette(args: argparse.Namespace) -> int:
         return 2  # CLI misuse
 
     table = palette_with_contrast(p)
-    (out_dir / "palette.json").write_text(
-        json.dumps(table, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    safeio_mod.atomic_write_text(
+        out_dir,
+        out_dir / "palette.json",
+        json.dumps(table, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
     logger.info("derive-palette: wrote %s", out_dir / "palette.json")
     return 0
@@ -1017,14 +1241,22 @@ def cmd_validate_system(args: argparse.Namespace) -> int:
 
     if args.out:
         out = Path(args.out)
-        out.mkdir(parents=True, exist_ok=True)
+        safeio_mod.ensure_output_dir(out, out)
         validation_path = out / "validation.json"
         matrix_path = out / "contrast-matrix.json"
-        validation_path.write_text(
-            json.dumps({"findings": findings}, indent=2) + "\n", encoding="utf-8"
+        safeio_mod.atomic_write_text(
+            out,
+            validation_path,
+            json.dumps({"findings": findings}, indent=2) + "\n",
+            encoding="utf-8",
         )
         logger.info("validate-system: wrote %s", validation_path)
-        matrix_path.write_text(json.dumps(matrix, indent=2) + "\n", encoding="utf-8")
+        safeio_mod.atomic_write_text(
+            out,
+            matrix_path,
+            json.dumps(matrix, indent=2) + "\n",
+            encoding="utf-8",
+        )
         logger.info("validate-system: wrote %s", matrix_path)
 
     return 1 if has_p0 else 0
@@ -1054,22 +1286,47 @@ def cmd_preview_system(args: argparse.Namespace) -> int:
         return 2
 
     out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    safeio_mod.ensure_output_dir(out, out)
 
-    (out / "preview.html").write_text(render_preview(system), encoding="utf-8")
+    safeio_mod.atomic_write_text(
+        out,
+        out / "preview.html",
+        render_preview(system),
+        encoding="utf-8",
+    )
     logger.info("preview-system: wrote %s", out / "preview.html")
 
-    (out / "system.md").write_text(render_system_md(system), encoding="utf-8")
+    safeio_mod.atomic_write_text(
+        out,
+        out / "system.md",
+        render_system_md(system),
+        encoding="utf-8",
+    )
     logger.info("preview-system: wrote %s", out / "system.md")
 
     # Mockups: real UI archetypes rendered with the system's tokens. Disabled
     # by default to keep `preview-system` cheap; opt in via --mockups.
     if getattr(args, "mockups", False):
         mock_dir = out / "mockups"
-        mock_dir.mkdir(parents=True, exist_ok=True)
-        (mock_dir / "landing.html").write_text(render_landing_mockup(system), encoding="utf-8")
-        (mock_dir / "dashboard.html").write_text(render_dashboard_mockup(system), encoding="utf-8")
-        (mock_dir / "form.html").write_text(render_form_mockup(system), encoding="utf-8")
+        safeio_mod.ensure_output_dir(out, mock_dir)
+        safeio_mod.atomic_write_text(
+            out,
+            mock_dir / "landing.html",
+            render_landing_mockup(system),
+            encoding="utf-8",
+        )
+        safeio_mod.atomic_write_text(
+            out,
+            mock_dir / "dashboard.html",
+            render_dashboard_mockup(system),
+            encoding="utf-8",
+        )
+        safeio_mod.atomic_write_text(
+            out,
+            mock_dir / "form.html",
+            render_form_mockup(system),
+            encoding="utf-8",
+        )
         logger.info(
             "preview-system: wrote 3 mockups → %s",
             mock_dir.relative_to(out.parent) if out.parent != Path(".") else mock_dir,
@@ -1099,8 +1356,11 @@ def cmd_preview_system(args: argparse.Namespace) -> int:
             except (OSError, json.JSONDecodeError) as e:
                 logger.warning("preview-system: cannot read %s: %s; skipping", ref_json, e)
         if refs:
-            (out / "comparison.html").write_text(
-                render_comparison(system, refs, labels), encoding="utf-8"
+            safeio_mod.atomic_write_text(
+                out,
+                out / "comparison.html",
+                render_comparison(system, refs, labels),
+                encoding="utf-8",
             )
             logger.info("preview-system: wrote %s", out / "comparison.html")
         else:
@@ -1206,13 +1466,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # 6. Default outdir writable
     outdir = Path(".keen")
     try:
-        outdir.mkdir(parents=True, exist_ok=True)
+        safeio_mod.ensure_output_dir(outdir, outdir)
         probe = outdir / ".write-probe"
-        probe.write_text("ok", encoding="utf-8")
+        safeio_mod.atomic_write_text(outdir, probe, "ok", encoding="utf-8")
         probe.unlink()
         out_ok = True
         out_msg = f"ok ({outdir.resolve()})"
-    except OSError as e:
+    except (OSError, safeio_mod.UnsafeOutputError) as e:
         out_ok = False
         out_msg = f"fix: cannot write to {outdir} ({e})"
     results.append((".keen/ writable", out_ok, out_msg))
@@ -1444,6 +1704,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-file",
         action="store_true",
         default=False,
+        help="Accepted for parity with capture; ignored by audit.",
+    )
+    pa.add_argument(
+        "--allow-origin",
+        action="append",
+        default=[],
         help="Accepted for parity with capture; ignored by audit.",
     )
     pa.set_defaults(func=cmd_audit)

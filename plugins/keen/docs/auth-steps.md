@@ -8,6 +8,31 @@ action whitelist. No user-provided Python is executed.
 This is the **preferred** way to authenticate. Use `--auth-script` only when
 your flow legitimately cannot be expressed in the DSL.
 
+Every Playwright-backed action accepts `timeout_ms` only where the table lists
+it. The value must be between 1 and 60,000 milliseconds. `--allow-internal`
+applies consistently to the review target, declarative `goto` steps, cookies,
+redirects, and browser subresources; metadata and carrier-grade NAT ranges
+remain blocked even when local/private targets are explicitly allowed.
+
+For a one-time local review that cannot be expressed safely as steps, use
+`--interactive-auth`. Keen opens headed Chromium, waits for the user to sign
+in, and reuses that ephemeral browser state for the requested capture matrix.
+Keen does not write the resulting cookies or storage values into review
+artifacts. The option requires an interactive terminal and is mutually
+exclusive with `--auth-steps` and `--auth-script`.
+
+```bash
+keen review "http://localhost:3000/account" \
+  --allow-internal \
+  --interactive-auth \
+  --expect-selector "[data-account-ready]"
+```
+
+Do not remove or weaken product authentication merely to make a page
+capturable. A server-side, development-only route can be appropriate for a
+true design sandbox, but real authenticated product screens should be reviewed
+through their real access path.
+
 ## Why declarative is preferred
 
 `--auth-script` loads a `.py` file and runs `exec_module` on it, so any code
@@ -275,6 +300,36 @@ If your script does *anything beyond* the action whitelist — captcha solving,
 | Credential leakage in logs   | `value_env` reads the env var; the **name** is logged, the **value** never is. Literal `value` is permitted but warned about. |
 | Missing env vars             | `ValueError("env var NAME not set for fill step")` — the value itself never enters the error message. |
 | `eval_safe` whitelist bypass | Every alternative form goes through the same regex gate; mismatches raise `ValueError`. |
+| Interactive session artifacts | Keen does not serialize captured cookies, localStorage, or sessionStorage into the run directory. |
+
+## Capture integrity after authentication
+
+After authentication, Keen revisits the requested target and verifies the final
+surface. By default, the final URL must preserve the requested origin, path,
+query string, and fragment; a trailing slash is normalized and a same-host
+HTTP-to-HTTPS upgrade is accepted. A changed URL blocks review unless the
+intended destination was declared with `--expect-url`. An explicit path-glob
+expectation can match a broader path family: if that pattern omits a query or
+fragment, either is allowed; if it includes one, it must match exactly. Use
+`--expect-selector` when the protected and unprotected surfaces share a URL.
+
+`--allow-internal` does not grant the captured page access to every service on
+the machine or private network. Keen permits only the exact origins named by
+the target, a non-glob `--expect-url`, and `goto` auth steps. Declare a separate
+development API explicitly with repeatable
+`--allow-origin http://127.0.0.1:PORT` options. Each value must be an origin
+only, without a path, query, fragment, or credentials.
+
+For `file:` review, `--allow-file` authorizes the exact target and explicit
+auth-step documents. Same-directory publication assets can load, but sibling
+documents, unrecognized asset types, traversal, and symlink escapes cannot.
+Use a local HTTP server for projects whose source directory also contains
+private files.
+
+A blocked run keeps a screenshot and DOM dump for diagnosis, writes
+`agent-brief.json` with `review_status.status = "blocked"`, and does not
+decompose, score, or produce a normal report. Those diagnostic artifacts also
+cannot be reviewed later with `keen audit`.
 
 The `--auth-script` escape hatch still exists, gated behind
 `--unsafe-auth-script` plus cwd containment (`--unsafe-auth-script-anywhere`

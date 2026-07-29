@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from harness.decompose import Component, decompose
 
 # --- Helpers --------------------------------------------------------------
@@ -65,6 +67,24 @@ def test_decompose_empty_dom_returns_empty_list(tmp_path: Path) -> None:
 def test_decompose_no_elements_key_returns_empty(tmp_path: Path) -> None:
     p = tmp_path / "dom.json"
     p.write_text(json.dumps({"meta": {}}))
+    assert decompose(p) == []
+
+
+def test_blocked_diagnostic_dom_never_becomes_components(tmp_path: Path) -> None:
+    p = _write_dom(
+        tmp_path,
+        [_elem(0, "button", role="button", name="Sign in", text="Sign in")],
+        extra={
+            "coverage": {
+                "complete": False,
+                "expectation": {
+                    "status": "blocked",
+                    "reason_code": "unexpected-url",
+                },
+            }
+        },
+    )
+
     assert decompose(p) == []
 
 
@@ -437,6 +457,43 @@ def test_decompose_preserves_attributes(tmp_path: Path) -> None:
     assert c.has_user_focus_rule is True
     assert c.parent_index == 5
     assert c.type == "email"
+
+
+def test_decompose_preserves_effective_opacity(tmp_path: Path) -> None:
+    p = _write_dom(
+        tmp_path,
+        [_elem(0, "button", text="Go", effectiveOpacity=0.5)],
+    )
+    assert decompose(p)[0].effective_opacity == 0.5
+
+
+def test_decompose_preserves_effective_ancestor_disabled_state(tmp_path: Path) -> None:
+    p = _write_dom(
+        tmp_path,
+        [_elem(0, "button", text="Unavailable", effectiveAriaDisabled=True)],
+    )
+    assert decompose(p)[0].aria_disabled is True
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"effectiveOpacity": 0},
+        {"effectiveAriaHidden": True},
+    ],
+)
+def test_decompose_skips_elements_hidden_by_ancestor_or_effective_opacity(
+    tmp_path: Path,
+    extra: dict,
+) -> None:
+    p = _write_dom(
+        tmp_path,
+        [
+            _elem(0, "button", name="Hidden duplicate", **extra),
+            _elem(1, "button", name="Visible"),
+        ],
+    )
+    assert [component.name for component in decompose(p)] == ["Visible"]
 
 
 # --- Component dataclass --------------------------------------------------

@@ -29,6 +29,8 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
+from harness import _safeio as safeio_mod
+
 logger = logging.getLogger("keen.report.html")
 
 # Severity ranking used for sortable table data-sort-value.
@@ -881,7 +883,12 @@ def write_report(
             summary_md=summary_md,
             link_images=link_images,
         )
-        out_path.write_text(html_str, encoding="utf-8")
+        safeio_mod.atomic_write_text(
+            Path(captures_dir),
+            out_path,
+            html_str,
+            encoding="utf-8",
+        )
     except Exception:
         logger.exception("html report generation failed; report.html not written")
         # Best-effort: do not propagate. The caller already has JSON/MD.

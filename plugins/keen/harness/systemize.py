@@ -35,6 +35,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from harness import _artifacts as artifacts_mod
+from harness import _safeio as safeio_mod
 from harness._sanitize import sanitize_untrusted_text
 from harness.colors import parse_color, rel_luminance, to_hex
 
@@ -1539,10 +1541,29 @@ def systemize_run(run_dir: Path, name: str = "custom") -> dict[str, Any]:
     tokens_path = run_dir / "tokens" / "extracted.json"
     legacy_path = run_dir / "tokens.json"
 
-    if tokens_path.exists():
-        extracted = json.loads(tokens_path.read_text(encoding="utf-8"))
+    manifest_present = artifacts_mod.capture_manifest_present(run_dir)
+    if manifest_present:
+        # A cached token file can predate the current manifest. Recompute from
+        # the manifest-selected DOM rather than systemizing stale evidence.
+        from . import tokens as tokens_module
+
+        evidence = artifacts_mod.capture_evidence(run_dir)
+        if not evidence.reviewable:
+            raise artifacts_mod.ArtifactIntegrityError(
+                f"capture status is {evidence.status}; systemization requires reviewable evidence"
+            )
+        extracted = tokens_module.extract_from_captures(run_dir)
+        safeio_mod.ensure_output_dir(run_dir, tokens_path.parent)
+        safeio_mod.atomic_write_text(
+            run_dir,
+            tokens_path,
+            json.dumps(extracted, indent=2),
+            encoding="utf-8",
+        )
+    elif tokens_path.exists():
+        extracted = artifacts_mod.read_json_object(tokens_path)
     elif legacy_path.exists():
-        extracted = json.loads(legacy_path.read_text(encoding="utf-8"))
+        extracted = artifacts_mod.read_json_object(legacy_path)
     else:
         # Fall back to extracting from DOM dumps in this run.
         from . import tokens as tokens_module
@@ -1554,21 +1575,24 @@ def systemize_run(run_dir: Path, name: str = "custom") -> dict[str, Any]:
             )
         extracted = tokens_module.extract_from_captures(run_dir)
         # Cache for next time
-        tokens_path.parent.mkdir(parents=True, exist_ok=True)
-        tokens_path.write_text(json.dumps(extracted, indent=2), encoding="utf-8")
+        safeio_mod.ensure_output_dir(run_dir, tokens_path.parent)
+        safeio_mod.atomic_write_text(
+            run_dir,
+            tokens_path,
+            json.dumps(extracted, indent=2),
+            encoding="utf-8",
+        )
 
     proposal = propose_system(extracted, name=name)
 
-    manifest_path = run_dir / "capture-manifest.json"
-    if manifest_path.exists():
+    if manifest_present:
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            requested = manifest.get("requested") if isinstance(manifest, dict) else []
-            succeeded = manifest.get("succeeded") if isinstance(manifest, dict) else []
-            failures = manifest.get("failures") if isinstance(manifest, dict) else []
-            requested = requested if isinstance(requested, list) else []
-            succeeded = succeeded if isinstance(succeeded, list) else []
-            failures = failures if isinstance(failures, list) else []
+            manifest = artifacts_mod.load_capture_manifest(run_dir)
+            if manifest is None:  # pragma: no cover - existence checked above
+                raise artifacts_mod.ArtifactIntegrityError("capture manifest disappeared")
+            requested = manifest["requested"]
+            succeeded = manifest["succeeded"]
+            failures = manifest["failures"]
             proposal["evidence"]["capture_scope"] = {
                 "requested": len(requested),
                 "succeeded": len(succeeded),
@@ -1586,7 +1610,13 @@ def systemize_run(run_dir: Path, name: str = "custom") -> dict[str, Any]:
             if not proposal["evidence"]["capture_scope"]["complete"]:
                 proposal["decision"]["confidence"] = "low"
                 proposal["decision"]["recommendation"] = "insufficient-evidence"
-        except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
+        except (
+            OSError,
+            json.JSONDecodeError,
+            AttributeError,
+            TypeError,
+            ValueError,
+        ) as exc:
             proposal["evidence"]["capture_scope"] = {
                 "requested": 0,
                 "succeeded": 0,
@@ -1598,10 +1628,25 @@ def systemize_run(run_dir: Path, name: str = "custom") -> dict[str, Any]:
             proposal["decision"]["recommendation"] = "insufficient-evidence"
 
     out_dir = run_dir / "system"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / f"{name}.json").write_text(json.dumps(proposal, indent=2), encoding="utf-8")
-    (out_dir / f"{name}.md").write_text(render_markdown(proposal), encoding="utf-8")
-    (out_dir / f"{name}-preview.html").write_text(render_preview_html(proposal), encoding="utf-8")
+    safeio_mod.ensure_output_dir(run_dir, out_dir)
+    safeio_mod.atomic_write_text(
+        run_dir,
+        out_dir / f"{name}.json",
+        json.dumps(proposal, indent=2),
+        encoding="utf-8",
+    )
+    safeio_mod.atomic_write_text(
+        run_dir,
+        out_dir / f"{name}.md",
+        render_markdown(proposal),
+        encoding="utf-8",
+    )
+    safeio_mod.atomic_write_text(
+        run_dir,
+        out_dir / f"{name}-preview.html",
+        render_preview_html(proposal),
+        encoding="utf-8",
+    )
 
     return {
         "proposal": proposal,

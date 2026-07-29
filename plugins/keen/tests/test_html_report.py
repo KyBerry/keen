@@ -223,7 +223,7 @@ def _minimal_report(*, with_findings: bool = True) -> dict[str, Any]:
             },
         ]
     return {
-        "version": "0.8.0",
+        "version": "0.8.1",
         "target_system": "material-3",
         "captures": [
             {
@@ -535,6 +535,7 @@ def test_compose_writes_report_html(tmp_path: Path) -> None:
                         "name": "Submit",
                         "viewport": "desktop",
                         "state": "default",
+                        "capture_path": "screens/desktop-default.png",
                         "box": {"x": 0, "y": 0, "w": 100, "h": 40},
                         "styles": {},
                         "findings": [{"severity": "P0", "predicate_id": "x", "message": "m"}],
@@ -573,4 +574,4 @@ def test_compose_writes_report_html(tmp_path: Path) -> None:
         'id="tokens"',
     ):
         assert marker in text, f"missing {marker}"
-    assert rep["version"] == "0.8.0"
+    assert rep["version"] == "0.8.1"

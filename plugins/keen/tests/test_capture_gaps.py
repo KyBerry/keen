@@ -12,24 +12,65 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 from harness.capture import (
     DEFAULT_VIEWPORT_PRESETS,
     MAX_CAPTURE_CONCURRENCY,
+    CaptureBlocked,
     CaptureConfig,
     _apply_setup_step,
     _browser_launch_failure_message,
+    _capture_one,
     _concurrency,
     _enrich_accessibility_names,
+    _goto_with_retries,
     _parse_aria_snapshot_root,
     _screenshot_options,
     _slug,
+    _url_expectation_failure,
+    _url_matches_expectation,
+    _validate_capture_expectations,
     _validate_requested_matrix,
     load_states,
     load_viewport_presets,
+    preflight,
 )
+
+
+def test_capture_config_preserves_0_8_positional_order() -> None:
+    cfg = CaptureConfig(
+        "https://example.com",
+        ["desktop"],
+        ["default"],
+        False,
+        "#ready",
+        Path("auth-steps.json"),
+        Path("auth.py"),
+        Path("captures"),
+        Path("viewports.json"),
+        Path("states.json"),
+        True,
+        True,
+        12_345,
+        678,
+        True,
+    )
+
+    assert cfg.wait_selector == "#ready"
+    assert cfg.auth_steps_path == Path("auth-steps.json")
+    assert cfg.auth_script == Path("auth.py")
+    assert cfg.outdir == Path("captures")
+    assert cfg.allow_internal is True
+    assert cfg.allow_file is True
+    assert cfg.goto_timeout_ms == 12_345
+    assert cfg.settle_ms == 678
+    assert cfg.dismiss_banners is True
+    assert cfg.expect_url is None
+    assert cfg.interactive_auth is False
+    assert cfg.allow_origins == []
 
 
 def test_parse_aria_snapshot_root_reads_computed_name_and_state() -> None:
@@ -91,6 +132,32 @@ def test_accessibility_name_enrichment_uses_browser_tree_and_cleans_markers() ->
     assert page.evaluations[-1] == "data-keen-ax-index"
 
 
+def test_accessibility_name_enrichment_marks_snapshot_miss_incomplete() -> None:
+    class Locator:
+        async def aria_snapshot(self, *, timeout: int) -> str:
+            raise RuntimeError("snapshot unavailable")
+
+    class Page:
+        async def evaluate(self, _script: str, _arg: object) -> None:
+            return None
+
+        def locator(self, _selector: str) -> Locator:
+            return Locator()
+
+    dom = {
+        "elements": [
+            {"index": 0, "tag": "button", "name": "Fallback", "role": "button"},
+        ]
+    }
+    coverage = asyncio.run(_enrich_accessibility_names(Page(), dom))
+
+    assert coverage["attempted"] == 1
+    assert coverage["enriched"] == 0
+    assert coverage["failed"] == 1
+    assert coverage["complete"] is False
+    assert coverage["reason"] == "accessibility-name-miss"
+
+
 def test_browser_launch_failure_message_explains_missing_chromium() -> None:
     message = _browser_launch_failure_message(RuntimeError("Executable doesn't exist at /cache"))
 
@@ -102,6 +169,253 @@ def test_browser_launch_failure_message_preserves_other_errors() -> None:
     assert _browser_launch_failure_message(RuntimeError("sandbox denied")) == (
         "could not launch Chromium: sandbox denied"
     )
+
+
+def test_url_expectation_allows_canonical_changes_only() -> None:
+    target = "http://example.com/account/?mode=poc"
+
+    assert _url_matches_expectation(target, "https://example.com/account?mode=poc", None)
+    assert not _url_matches_expectation(target, "https://example.com/sign-in", None)
+    assert not _url_matches_expectation(target, "https://auth.example.com/account", None)
+    assert not _url_matches_expectation(
+        "https://example.com/app?mode=poc",
+        "https://example.com/app?mode=login",
+        None,
+    )
+    assert not _url_matches_expectation(
+        "https://example.com/#/poc",
+        "https://example.com/#/login",
+        None,
+    )
+
+
+def test_explicit_url_glob_accepts_an_intended_redirect() -> None:
+    assert _url_matches_expectation(
+        "https://example.com/",
+        "https://example.com/en/dashboard?tab=one",
+        "https://example.com/*/dashboard",
+    )
+
+
+def test_url_expectation_canonicalizes_unicode_host_and_path() -> None:
+    assert _url_matches_expectation(
+        "https://éxample.com/café",
+        "https://xn--xample-9ua.com/caf%C3%A9",
+        None,
+    )
+
+
+def test_url_expectation_rejects_authority_wildcard() -> None:
+    with pytest.raises(ValueError, match="only in the path"):
+        _validate_capture_expectations(
+            CaptureConfig(
+                target="https://example.com/dashboard",
+                expect_url="https://*/dashboard",
+            )
+        )
+
+
+def test_url_expectation_failure_redacts_query_values() -> None:
+    cfg = CaptureConfig(target="https://example.com/poc?preview_token=secret")
+
+    failure = _url_expectation_failure(
+        cfg,
+        "https://example.com/sign-in?callback_token=also-secret",
+    )
+
+    assert failure is not None
+    assert failure["reason_code"] == "unexpected-url"
+    assert failure["target"] == "https://example.com/poc"
+    assert failure["observed_url"] == "https://example.com/sign-in"
+    assert "secret" not in json.dumps(failure)
+
+
+def test_capture_expectations_reject_unsafe_or_ambiguous_inputs() -> None:
+    with pytest.raises(ValueError, match="absolute"):
+        _validate_capture_expectations(
+            CaptureConfig(target="https://example.com", expect_url="/dashboard")
+        )
+    with pytest.raises(ValueError, match="absolute"):
+        _validate_capture_expectations(CaptureConfig(target="https://example.com", expect_url="*"))
+    with pytest.raises(ValueError, match="control"):
+        _validate_capture_expectations(
+            CaptureConfig(target="https://example.com", expect_url="https://example.com/\nlogin")
+        )
+    with pytest.raises(ValueError, match="selector"):
+        _validate_capture_expectations(
+            CaptureConfig(target="https://example.com", wait_selector="${injected}")
+        )
+
+
+@pytest.mark.asyncio
+async def test_unexpected_redirect_writes_diagnostic_artifacts_before_blocking(
+    tmp_path: Path,
+) -> None:
+    class Page:
+        url = "https://example.com/sign-in?callback_token=secret"
+
+        async def goto(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def wait_for_timeout(self, _timeout: int) -> None:
+            return None
+
+        async def evaluate(self, script: str, *_args):
+            if "document.fonts" in script:
+                return None
+            return {
+                "url": self.url,
+                "title": "Sign in",
+                "documentSize": {"width": 1280, "height": 720},
+                "elements": [],
+                "coverage": {"complete": True, "reason": None},
+            }
+
+        async def screenshot(self, **_options) -> bytes:
+            return b"diagnostic"
+
+    class Context:
+        def __init__(self) -> None:
+            self.page = Page()
+
+        async def clear_cookies(self) -> None:
+            return None
+
+        async def clear_permissions(self) -> None:
+            return None
+
+        async def route(self, *_args) -> None:
+            return None
+
+        async def route_web_socket(self, *_args) -> None:
+            return None
+
+        async def new_page(self) -> Page:
+            return self.page
+
+        async def close(self) -> None:
+            return None
+
+    class Browser:
+        async def new_context(self, **_options) -> Context:
+            return Context()
+
+    cfg = CaptureConfig(
+        target="https://example.com/poc?preview_token=secret",
+        viewports=["desktop"],
+        states=["default"],
+        outdir=tmp_path,
+    )
+
+    with pytest.raises(CaptureBlocked, match="different URL") as exc:
+        await _capture_one(
+            Browser(),
+            cfg,
+            {"desktop": {"width": 1280, "height": 720, "deviceScaleFactor": 1}},
+            {"default": {"setup_steps": []}},
+            "desktop",
+            "default",
+        )
+
+    assert exc.value.reason_code == "unexpected-url"
+    assert exc.value.screen_path.exists()
+    dom = json.loads(exc.value.dom_path.read_text())
+    expectation = dom["coverage"]["expectation"]
+    assert expectation["status"] == "blocked"
+    assert expectation["observed_url"] == "https://example.com/sign-in"
+    assert "secret" not in exc.value.dom_path.read_text()
+
+
+@pytest.mark.asyncio
+async def test_delayed_redirect_after_dom_capture_is_still_blocked(tmp_path: Path) -> None:
+    class Page:
+        url = "https://example.com/product"
+
+        async def goto(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def wait_for_timeout(self, _timeout: int) -> None:
+            return None
+
+        async def evaluate(self, script: str, *_args):
+            if "document.fonts" in script:
+                return None
+            return {
+                "url": self.url,
+                "title": "Product",
+                "documentSize": {"width": 800, "height": 600},
+                "elements": [],
+                "coverage": {"complete": True, "reason": None},
+            }
+
+        async def screenshot(self, **_options) -> bytes:
+            self.url = "https://example.com/sign-in?token=late-secret"
+            return b"diagnostic"
+
+    class Context:
+        def __init__(self) -> None:
+            self.page = Page()
+
+        async def clear_cookies(self) -> None:
+            return None
+
+        async def clear_permissions(self) -> None:
+            return None
+
+        async def route(self, *_args) -> None:
+            return None
+
+        async def route_web_socket(self, *_args) -> None:
+            return None
+
+        async def new_page(self) -> Page:
+            return self.page
+
+        async def close(self) -> None:
+            return None
+
+    class Browser:
+        async def new_context(self, **_options) -> Context:
+            return Context()
+
+    cfg = CaptureConfig(
+        target="https://example.com/product",
+        viewports=["desktop"],
+        states=["default"],
+        outdir=tmp_path,
+    )
+    with pytest.raises(CaptureBlocked) as exc:
+        await _capture_one(
+            Browser(),
+            cfg,
+            {"desktop": {"width": 800, "height": 600, "deviceScaleFactor": 1}},
+            {"default": {"setup_steps": []}},
+            "desktop",
+            "default",
+        )
+    assert exc.value.reason_code == "unexpected-url"
+    assert "late-secret" not in exc.value.dom_path.read_text()
+
+
+@pytest.mark.asyncio
+async def test_navigation_failure_logs_never_expose_query_secret(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Page:
+        async def goto(self, *_args, **_kwargs) -> None:
+            raise RuntimeError(
+                "net::ERR_CONNECTION_REFUSED at https://example.com/review?token=sentinel-secret"
+            )
+
+    monkeypatch.setattr(asyncio, "sleep", mock.AsyncMock())
+    with caplog.at_level("WARNING"), pytest.raises(RuntimeError):
+        await _goto_with_retries(
+            Page(),
+            "https://example.com/review?token=sentinel-secret",
+            1_000,
+        )
+    assert "sentinel-secret" not in caplog.text
 
 
 def test_media_setup_steps_apply_to_page_not_context() -> None:
@@ -348,4 +662,76 @@ def test_capture_config_defaults() -> None:
     assert cfg.viewports == ["mobile", "tablet", "desktop"]
     assert cfg.states == ["default"]
     assert cfg.allow_internal is False
+    assert cfg.allow_origins == []
+    assert cfg.allow_file is False
+    assert cfg.file_request_roots == ()
+    assert cfg.file_document_paths == ()
+    assert cfg.internal_request_origins == ()
     assert cfg.goto_timeout_ms == 30_000
+    assert cfg.expect_url is None
+    assert cfg.interactive_auth is False
+
+
+def test_preflight_scopes_file_requests_to_explicit_target_and_auth_roots(
+    tmp_path: Path,
+) -> None:
+    target_dir = tmp_path / "surface"
+    auth_dir = tmp_path / "auth"
+    target_dir.mkdir()
+    auth_dir.mkdir()
+    target = target_dir / "index.html"
+    auth_page = auth_dir / "login.html"
+    target.write_text("surface", encoding="utf-8")
+    auth_page.write_text("login", encoding="utf-8")
+    steps_path = tmp_path / "auth.json"
+    steps_path.write_text(
+        json.dumps({"steps": [{"action": "goto", "url": auth_page.as_uri()}]}),
+        encoding="utf-8",
+    )
+    cfg = CaptureConfig(
+        target=target.as_uri(),
+        allow_file=True,
+        auth_steps_path=steps_path,
+    )
+
+    preflight(cfg)
+
+    assert set(cfg.file_request_roots) == {
+        target_dir.resolve(),
+        auth_dir.resolve(),
+    }
+    assert set(cfg.file_document_paths) == {
+        target.resolve(),
+        auth_page.resolve(),
+    }
+
+
+def test_preflight_scopes_internal_requests_and_requires_explicit_extra_origins() -> None:
+    cfg = CaptureConfig(
+        target="http://127.0.0.1:3000/app",
+        allow_internal=True,
+        allow_origins=["http://127.0.0.1:8787"],
+    )
+
+    preflight(cfg)
+
+    assert set(cfg.internal_request_origins) == {
+        ("http", "127.0.0.1", 3000),
+        ("http", "127.0.0.1", 8787),
+    }
+
+    with pytest.raises(ValueError, match="requires --allow-internal"):
+        preflight(
+            CaptureConfig(
+                target="https://example.com",
+                allow_origins=["http://127.0.0.1:8787"],
+            )
+        )
+    with pytest.raises(ValueError, match="must not include a path"):
+        preflight(
+            CaptureConfig(
+                target="http://127.0.0.1:3000",
+                allow_internal=True,
+                allow_origins=["http://127.0.0.1:8787/api"],
+            )
+        )

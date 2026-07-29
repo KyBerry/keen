@@ -25,7 +25,6 @@ Pure Python — no model calls, no I/O outside the captures directory.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections import Counter, defaultdict
@@ -34,6 +33,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from harness import _artifacts as artifacts_mod
 from harness._oklch import hex_to_oklch
 from harness.colors import is_neutral_hex, to_hex
 
@@ -520,21 +520,22 @@ TAILWIND_PALETTE_HEX: set[str] = {
 def _components_by_capture(captures_dir: Path) -> list[tuple[str, list[dict]]]:
     """Return decomposed components without erasing their capture boundary."""
     captures: list[tuple[str, list[dict]]] = []
-    comp_dir = captures_dir / "components"
-    if not comp_dir.exists():
-        return captures
-    for path in sorted(comp_dir.glob("*.json")):
+    evidence = artifacts_mod.capture_evidence(captures_dir)
+    paths = artifacts_mod.stage_paths(captures_dir, "components", evidence.dom_paths)
+    if evidence.legacy and not evidence.dom_paths:
+        paths = tuple(sorted((captures_dir / "components").glob("*.json")))
+    elif evidence.manifest is not None and len(paths) != len(evidence.dom_paths):
+        raise artifacts_mod.ArtifactIntegrityError(
+            "component artifacts are incomplete for the current capture manifest"
+        )
+    for path in paths:
         # Only the per-capture component lists (file stems like
         # `<slug>-<viewport>-<state>.json`). Skip the per-component crop PNGs
         # and any leftover dump files.
         if path.suffix != ".json":
             continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(data, list):
-            captures.append((path.stem, data))
+        data = artifacts_mod.read_component_list(path)
+        captures.append((path.stem, data))
     return captures
 
 
@@ -572,12 +573,17 @@ def _normalize_token_counts(value: Any, capture_count: int) -> Any:
 
 
 def _tokens(captures_dir: Path) -> dict[str, Any]:
+    evidence = artifacts_mod.capture_evidence(captures_dir)
+    if evidence.manifest is not None:
+        from harness import tokens as tokens_mod
+
+        return tokens_mod.extract_from_captures(captures_dir)
     path = captures_dir / "tokens" / "extracted.json"
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return artifacts_mod.read_json_object(path)
+    except artifacts_mod.ArtifactIntegrityError:
         return {}
 
 

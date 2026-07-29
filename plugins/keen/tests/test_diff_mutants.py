@@ -14,13 +14,21 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from harness._artifacts import ArtifactIntegrityError
 from harness.diff import diff_runs, render_markdown
 
 
 def _write_run(base: Path, name: str, report: dict) -> Path:
     rd = base / name
     rd.mkdir(parents=True, exist_ok=True)
-    (rd / "report.json").write_text(json.dumps(report))
+    normalized = dict(report)
+    score = dict(normalized.get("score") or {})
+    score.setdefault("score", 0)
+    score.setdefault("grade", "A")
+    normalized["score"] = score
+    (rd / "report.json").write_text(json.dumps(normalized))
     return rd
 
 
@@ -311,120 +319,70 @@ def test_diff_runs_uses_pipe_joiner_for_key(tmp_path: Path) -> None:
     assert len(result["unchanged"]) == 2
 
 
-def test_diff_runs_missing_predicate_id_uses_empty_string(tmp_path: Path) -> None:
-    # mutmut: kill mutation 327 — was: f.get("predicate_id", "") ->
-    # f.get("predicate_id", "XXXX"). The default for the missing key
-    # must be "" so the key shape remains "|kind|vp|state|idx".
+def test_diff_runs_rejects_missing_predicate_id(tmp_path: Path) -> None:
     component = {
         "component_kind": "btn",
         "viewport": "v",
         "state": "s",
         "component_index": 0,
-        "findings": [{"severity": "P0"}],  # no predicate_id key
-    }
-    # Build a *different* component with predicate_id="" explicitly in B.
-    # Both should produce the same key, and dedup as unchanged.
-    component_b = {
-        "component_kind": "btn",
-        "viewport": "v",
-        "state": "s",
-        "component_index": 0,
-        "findings": [{"severity": "P0", "predicate_id": ""}],
+        "findings": [{"severity": "P0"}],
     }
     a_dir = _write_run(tmp_path, "a", {"components": [component], "score": {}})
-    b_dir = _write_run(tmp_path, "b", {"components": [component_b], "score": {}})
-    result = diff_runs(a_dir, b_dir)
-    # Under the original default "", both keys are the same.
-    # Under the mutant default "XXXX", a's key has "XXXX" where b's has "".
-    assert len(result["unchanged"]) == 1
-    assert len(result["added"]) == 0
-    assert len(result["removed"]) == 0
+    b_dir = _write_run(tmp_path, "b", {"components": [], "score": {}})
+    with pytest.raises(ArtifactIntegrityError, match="predicate_id"):
+        diff_runs(a_dir, b_dir)
 
 
-def test_diff_runs_missing_component_kind_uses_empty_string(tmp_path: Path) -> None:
-    # mutmut: kill mutation 329 — was: c.get("component_kind", "") ->
-    # c.get("component_kind", "XXXX").
+def test_diff_runs_rejects_missing_component_kind(tmp_path: Path) -> None:
     no_kind = {
         "viewport": "v",
         "state": "s",
         "component_index": 0,
         "findings": [{"predicate_id": "p", "severity": "P0"}],
     }
-    explicit_empty_kind = {
-        "component_kind": "",
-        "viewport": "v",
-        "state": "s",
-        "component_index": 0,
-        "findings": [{"predicate_id": "p", "severity": "P0"}],
-    }
     a_dir = _write_run(tmp_path, "a", {"components": [no_kind], "score": {}})
-    b_dir = _write_run(tmp_path, "b", {"components": [explicit_empty_kind], "score": {}})
-    result = diff_runs(a_dir, b_dir)
-    assert len(result["unchanged"]) == 1
+    b_dir = _write_run(tmp_path, "b", {"components": [], "score": {}})
+    with pytest.raises(ArtifactIntegrityError, match="component_kind"):
+        diff_runs(a_dir, b_dir)
 
 
-def test_diff_runs_missing_viewport_uses_empty_string(tmp_path: Path) -> None:
-    # mutmut: kill mutation 331 — was: c.get("viewport", "") -> "XXXX".
+def test_diff_runs_rejects_missing_viewport(tmp_path: Path) -> None:
     no_vp = {
         "component_kind": "btn",
         "state": "s",
         "component_index": 0,
         "findings": [{"predicate_id": "p", "severity": "P0"}],
     }
-    explicit_empty_vp = {
-        "component_kind": "btn",
-        "viewport": "",
-        "state": "s",
-        "component_index": 0,
-        "findings": [{"predicate_id": "p", "severity": "P0"}],
-    }
     a_dir = _write_run(tmp_path, "a", {"components": [no_vp], "score": {}})
-    b_dir = _write_run(tmp_path, "b", {"components": [explicit_empty_vp], "score": {}})
-    result = diff_runs(a_dir, b_dir)
-    assert len(result["unchanged"]) == 1
+    b_dir = _write_run(tmp_path, "b", {"components": [], "score": {}})
+    with pytest.raises(ArtifactIntegrityError, match="viewport"):
+        diff_runs(a_dir, b_dir)
 
 
-def test_diff_runs_missing_state_uses_empty_string(tmp_path: Path) -> None:
-    # mutmut: kill mutation 333 — was: c.get("state", "") -> "XXXX".
+def test_diff_runs_rejects_missing_state(tmp_path: Path) -> None:
     no_state = {
         "component_kind": "btn",
         "viewport": "v",
         "component_index": 0,
         "findings": [{"predicate_id": "p", "severity": "P0"}],
     }
-    explicit_empty_state = {
-        "component_kind": "btn",
-        "viewport": "v",
-        "state": "",
-        "component_index": 0,
-        "findings": [{"predicate_id": "p", "severity": "P0"}],
-    }
     a_dir = _write_run(tmp_path, "a", {"components": [no_state], "score": {}})
-    b_dir = _write_run(tmp_path, "b", {"components": [explicit_empty_state], "score": {}})
-    result = diff_runs(a_dir, b_dir)
-    assert len(result["unchanged"]) == 1
+    b_dir = _write_run(tmp_path, "b", {"components": [], "score": {}})
+    with pytest.raises(ArtifactIntegrityError, match="state"):
+        diff_runs(a_dir, b_dir)
 
 
-def test_diff_runs_missing_component_index_uses_empty_string(tmp_path: Path) -> None:
-    # Per the source the default for c.get("component_index", "") wraps in
-    # str(), giving "" when missing.
+def test_diff_runs_rejects_missing_component_index(tmp_path: Path) -> None:
     no_idx = {
         "component_kind": "btn",
         "viewport": "v",
         "state": "s",
         "findings": [{"predicate_id": "p", "severity": "P0"}],
     }
-    explicit_empty_idx = {
-        "component_kind": "btn",
-        "viewport": "v",
-        "state": "s",
-        "component_index": "",
-        "findings": [{"predicate_id": "p", "severity": "P0"}],
-    }
     a_dir = _write_run(tmp_path, "a", {"components": [no_idx], "score": {}})
-    b_dir = _write_run(tmp_path, "b", {"components": [explicit_empty_idx], "score": {}})
-    result = diff_runs(a_dir, b_dir)
-    assert len(result["unchanged"]) == 1
+    b_dir = _write_run(tmp_path, "b", {"components": [], "score": {}})
+    with pytest.raises(ArtifactIntegrityError, match="index"):
+        diff_runs(a_dir, b_dir)
 
 
 def test_diff_runs_key_joiner_is_literal_pipe_not_double_X(tmp_path: Path) -> None:
@@ -1363,13 +1321,16 @@ def test_diff_runs_loads_score_a_and_score_b_separately(tmp_path: Path) -> None:
     assert result["score_b"] == {"score": 3, "grade": "A"}
 
 
-def test_diff_runs_missing_score_defaults_to_empty_dict(tmp_path: Path) -> None:
+def test_diff_runs_rejects_missing_score(tmp_path: Path) -> None:
     rep = {"components": []}
-    a_dir = _write_run(tmp_path, "a", rep)
-    b_dir = _write_run(tmp_path, "b", rep)
-    result = diff_runs(a_dir, b_dir)
-    assert result["score_a"] == {}
-    assert result["score_b"] == {}
+    a_dir = tmp_path / "a"
+    b_dir = tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    (a_dir / "report.json").write_text(json.dumps(rep))
+    (b_dir / "report.json").write_text(json.dumps(rep))
+    with pytest.raises(ArtifactIntegrityError, match="score"):
+        diff_runs(a_dir, b_dir)
 
 
 def test_diff_runs_run_a_run_b_strings_are_paths(tmp_path: Path) -> None:

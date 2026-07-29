@@ -1,6 +1,6 @@
 {
   "name": "keen",
-  "version": "0.8.0+codex.20260723015218",
+  "version": "0.8.1+codex.20260729030951",
   "description": "Design guidance and visual review for websites built with coding agents. Requires the local Keen CLI and Playwright Chromium runtime.",
   "author": {
     "name": "Kyle Berry",

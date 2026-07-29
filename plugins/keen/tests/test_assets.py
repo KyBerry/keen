@@ -40,7 +40,7 @@ def test_release_versions_stay_in_sync() -> None:
         codex_base_version,
         project_match.group(1),
         listing["version"],
-    } == {"0.8.0"}
+    } == {"0.8.1"}
 
 
 def test_codex_marketplace_uses_clean_generated_bundle() -> None:

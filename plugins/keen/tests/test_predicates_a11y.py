@@ -144,6 +144,13 @@ def test_non_text_contrast_fires_on_low_contrast_border() -> None:
                 "backgroundColor": "rgb(255, 255, 255)",
                 "borderColor": "rgb(230, 230, 230)",  # ~1.2:1 vs white
                 "borderTopColor": "rgb(230, 230, 230)",
+                "borderTopWidth": "1px",
+                "borderRightColor": "rgb(230, 230, 230)",
+                "borderRightWidth": "1px",
+                "borderBottomColor": "rgb(230, 230, 230)",
+                "borderBottomWidth": "1px",
+                "borderLeftColor": "rgb(230, 230, 230)",
+                "borderLeftWidth": "1px",
                 "fontSize": "16px",
             },
         )
@@ -165,6 +172,13 @@ def test_non_text_contrast_passes_on_dark_border() -> None:
                 "backgroundColor": "rgb(255, 255, 255)",
                 "borderColor": "rgb(0, 0, 0)",
                 "borderTopColor": "rgb(0, 0, 0)",
+                "borderTopWidth": "1px",
+                "borderRightColor": "rgb(0, 0, 0)",
+                "borderRightWidth": "1px",
+                "borderBottomColor": "rgb(0, 0, 0)",
+                "borderBottomWidth": "1px",
+                "borderLeftColor": "rgb(0, 0, 0)",
+                "borderLeftWidth": "1px",
                 "fontSize": "16px",
             },
         )
@@ -187,6 +201,7 @@ def test_non_text_contrast_skips_disabled() -> None:
                 "backgroundColor": "rgb(255, 255, 255)",
                 "borderColor": "rgb(230, 230, 230)",
                 "borderTopColor": "rgb(230, 230, 230)",
+                "borderTopWidth": "1px",
                 "fontSize": "16px",
             },
         )
@@ -211,6 +226,105 @@ def test_non_text_contrast_skips_borderless() -> None:
         )
     ]
     assert "contrast.non-text" not in _findings(comps)
+
+
+def test_non_text_contrast_skips_zero_width_border_color() -> None:
+    """Computed border colors do not count when every border side is 0px."""
+    comps = [
+        _comp(
+            component_kind="textarea",
+            role="textbox",
+            tag="textarea",
+            name="Message",
+            text="",
+            styles={
+                "color": "rgb(0,0,0)",
+                "backgroundColor": "rgb(255, 255, 255)",
+                "borderColor": "rgb(230, 230, 230)",
+                "borderTopColor": "rgb(230, 230, 230)",
+                "borderTopWidth": "0px",
+                "borderRightColor": "rgb(230, 230, 230)",
+                "borderRightWidth": "0px",
+                "borderBottomColor": "rgb(230, 230, 230)",
+                "borderBottomWidth": "0px",
+                "borderLeftColor": "rgb(230, 230, 230)",
+                "borderLeftWidth": "0px",
+                "fontSize": "16px",
+            },
+        )
+    ]
+    assert "contrast.non-text" not in _findings(comps)
+
+
+def test_non_text_contrast_uses_strongest_rendered_side() -> None:
+    """One clearly rendered side is enough to expose the control boundary."""
+    comps = [
+        _comp(
+            component_kind="textarea",
+            role="textbox",
+            tag="textarea",
+            name="Message",
+            text="",
+            styles={
+                "color": "rgb(0,0,0)",
+                "backgroundColor": "rgb(255, 255, 255)",
+                "borderTopColor": "rgb(230, 230, 230)",
+                "borderTopWidth": "1px",
+                "borderRightColor": "rgb(230, 230, 230)",
+                "borderRightWidth": "1px",
+                "borderBottomColor": "rgb(0, 0, 0)",
+                "borderBottomWidth": "1px",
+                "borderLeftColor": "rgb(230, 230, 230)",
+                "borderLeftWidth": "1px",
+                "fontSize": "16px",
+            },
+        )
+    ]
+    assert "contrast.non-text" not in _findings(comps)
+
+
+def test_non_text_contrast_uses_adjacent_surface_not_control_fill() -> None:
+    """A white boundary is visible against a black page despite a white fill."""
+    comps = [
+        _comp(
+            component_kind="text-input",
+            role="textbox",
+            tag="input",
+            name="Email",
+            text="",
+            document_background="rgb(0, 0, 0)",
+            styles={
+                "color": "rgb(0, 0, 0)",
+                "backgroundColor": "rgb(255, 255, 255)",
+                "borderTopColor": "rgb(255, 255, 255)",
+                "borderTopWidth": "1px",
+                "fontSize": "16px",
+            },
+        )
+    ]
+    assert "contrast.non-text" not in _findings(comps)
+
+
+def test_non_text_contrast_catches_boundary_lost_against_adjacent_surface() -> None:
+    """A black boundary disappears against a black page despite a white fill."""
+    comps = [
+        _comp(
+            component_kind="text-input",
+            role="textbox",
+            tag="input",
+            name="Email",
+            text="",
+            document_background="rgb(0, 0, 0)",
+            styles={
+                "color": "rgb(0, 0, 0)",
+                "backgroundColor": "rgb(255, 255, 255)",
+                "borderTopColor": "rgb(0, 0, 0)",
+                "borderTopWidth": "1px",
+                "fontSize": "16px",
+            },
+        )
+    ]
+    assert "contrast.non-text" in _findings(comps)
 
 
 # --- label-in-name (WCAG 2.5.3) -------------------------------------------

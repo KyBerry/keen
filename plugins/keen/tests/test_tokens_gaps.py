@@ -29,7 +29,19 @@ from harness.tokens import (
 def _write_dom(captures_dir: Path, name: str, elements: list[dict]) -> None:
     dom_dir = captures_dir / "dom"
     dom_dir.mkdir(parents=True, exist_ok=True)
-    (dom_dir / name).write_text(json.dumps({"elements": elements}))
+    normalized = []
+    for index, element in enumerate(elements):
+        box = {"x": 0, "y": 0, "w": 100, "h": 40, **(element.get("box") or {})}
+        normalized.append(
+            {
+                "index": index,
+                "tag": "div",
+                "styles": {},
+                **element,
+                "box": box,
+            }
+        )
+    (dom_dir / name).write_text(json.dumps({"elements": normalized}))
 
 
 def test_extract_from_captures_aggregates_styles(tmp_path: Path) -> None:

@@ -16,7 +16,12 @@ from harness.diff import diff_runs, render_markdown
 def _write_run(base: Path, name: str, report: dict) -> Path:
     rd = base / name
     rd.mkdir(parents=True, exist_ok=True)
-    (rd / "report.json").write_text(json.dumps(report))
+    normalized = dict(report)
+    score = dict(normalized.get("score") or {})
+    score.setdefault("score", 0)
+    score.setdefault("grade", "A")
+    normalized["score"] = score
+    (rd / "report.json").write_text(json.dumps(normalized))
     return rd
 
 
