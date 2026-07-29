@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest import mock
 
 import pytest
@@ -28,6 +28,7 @@ from harness.capture import (
     _enrich_accessibility_names,
     _goto_with_retries,
     _parse_aria_snapshot_root,
+    _portable_artifact_path,
     _screenshot_options,
     _slug,
     _url_expectation_failure,
@@ -38,6 +39,13 @@ from harness.capture import (
     load_viewport_presets,
     preflight,
 )
+
+
+def test_capture_artifact_paths_use_portable_separators() -> None:
+    root = PureWindowsPath("C:/runs/current")
+    screen = root / "screens" / "home-desktop-default.png"
+
+    assert _portable_artifact_path(screen, root) == "screens/home-desktop-default.png"
 
 
 def test_capture_config_preserves_0_8_positional_order() -> None:
@@ -556,6 +564,11 @@ def test_slug_no_path_uses_netloc() -> None:
 
 def test_slug_special_chars_normalized() -> None:
     assert _slug("https://example.com/foo%20bar?x=1") == "foo-20bar"
+
+
+@pytest.mark.parametrize("name", ["con.foo", "LPT1.anything", "nul"])
+def test_slug_avoids_windows_device_names_with_extensions(name: str) -> None:
+    assert _slug(f"https://example.com/{name}") == f"page-{name.lower()}"
 
 
 # --- _concurrency --------------------------------------------------------

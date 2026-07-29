@@ -262,7 +262,7 @@ def _crop_components(captures_dir: Path, components: list[dict]) -> None:
             buffer = io.BytesIO()
             crop.save(buffer, format="PNG")
             safeio_mod.atomic_write_bytes(captures_dir, crop_path, buffer.getvalue())
-            c["crop_path"] = str(crop_path.relative_to(captures_dir))
+            c["crop_path"] = crop_path.relative_to(captures_dir).as_posix()
         except (OSError, ValueError):
             logger.warning(
                 "failed to save crop %s",
@@ -547,7 +547,7 @@ def _annotate_overviews(
             buffer = io.BytesIO()
             img.save(buffer, format="PNG")
             safeio_mod.atomic_write_bytes(captures_dir, out_path, buffer.getvalue())
-            annotated_paths[stem] = str(out_path.relative_to(captures_dir))
+            annotated_paths[stem] = out_path.relative_to(captures_dir).as_posix()
         except (OSError, ValueError):
             logger.warning(
                 "failed to save annotated overview %s",
@@ -721,7 +721,7 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
                 artifacts_mod.validate_analysis_capture_binding(
                     data,
                     matching_dom,
-                    where=str(analysis_path.relative_to(captures_dir)),
+                    where=analysis_path.relative_to(captures_dir).as_posix(),
                 )
         except artifacts_mod.ArtifactIntegrityError as exc:
             return _analysis_integrity_report(captures_dir, target_system, evidence, exc)
@@ -738,7 +738,7 @@ def compose(captures_dir: Path, target_system: str | None = None) -> dict[str, A
             global_findings.append(finding)
         summaries.append(
             {
-                "file": str(analysis_path.relative_to(captures_dir)),
+                "file": analysis_path.relative_to(captures_dir).as_posix(),
                 **data.get("summary", {}),
             }
         )

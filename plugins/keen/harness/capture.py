@@ -44,7 +44,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlparse
 
@@ -126,6 +126,11 @@ class CaptureBlocked(RuntimeError):
         self.expected_url = expected_url
         self.observed_url = observed_url
         self.expected_selector = expected_selector
+
+
+def _portable_artifact_path(path: PurePath, root: PurePath) -> str:
+    """Serialize a capture-relative path with one cross-platform spelling."""
+    return path.relative_to(root).as_posix()
 
 
 def _browser_launch_failure_message(exc: Exception) -> str:
@@ -1153,11 +1158,7 @@ def _slug(s: str) -> str:
         base = parsed.netloc or "root"
     base = re.sub(r"[^a-zA-Z0-9._-]+", "-", base).strip("-").lower()
     base = (base or "page")[:100].rstrip(".")
-    if base.upper() in {"CON", "PRN", "AUX", "NUL"} or re.fullmatch(
-        r"(?:COM|LPT)[1-9]",
-        base,
-        flags=re.IGNORECASE,
-    ):
+    if artifacts_mod.is_windows_reserved_artifact_name(base):
         base = f"page-{base}"
     return base or "page"
 
@@ -2665,7 +2666,7 @@ async def _capture_one(
             "viewport": viewport,
             "viewport_size": preset,
             "state": state,
-            "screen_path": str(screen_path.relative_to(cfg.outdir)),
+            "screen_path": _portable_artifact_path(screen_path, cfg.outdir),
             "manual_review_needed": bool(state_spec.get("manual_review_needed", False))
             or websocket_status["attempted"] > 0
             or empty_surface
@@ -2905,8 +2906,8 @@ async def _run_async(cfg: CaptureConfig) -> None:
                         failure.update(
                             {
                                 "reason_code": res.reason_code,
-                                "screen": str(res.screen_path.relative_to(cfg.outdir)),
-                                "dom": str(res.dom_path.relative_to(cfg.outdir)),
+                                "screen": _portable_artifact_path(res.screen_path, cfg.outdir),
+                                "dom": _portable_artifact_path(res.dom_path, cfg.outdir),
                                 "diagnostic_only": True,
                                 "expected_url": res.expected_url,
                                 "observed_url": res.observed_url,
@@ -2920,8 +2921,8 @@ async def _run_async(cfg: CaptureConfig) -> None:
                         {
                             "viewport": vp,
                             "state": st,
-                            "screen": str(screen_path.relative_to(cfg.outdir)),
-                            "dom": str(dom_path.relative_to(cfg.outdir)),
+                            "screen": _portable_artifact_path(screen_path, cfg.outdir),
+                            "dom": _portable_artifact_path(dom_path, cfg.outdir),
                         }
                     )
 

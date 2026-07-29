@@ -29,6 +29,9 @@ _WINDOWS_RESERVED_NAMES = frozenset(
         "PRN",
         "AUX",
         "NUL",
+        "CLOCK$",
+        "CONIN$",
+        "CONOUT$",
         *(f"COM{i}" for i in range(1, 10)),
         *(f"LPT{i}" for i in range(1, 10)),
     }
@@ -41,6 +44,38 @@ class ArtifactIntegrityError(ValueError):
     def __init__(self, message: str, *, reason_code: str = "invalid-artifact") -> None:
         super().__init__(message)
         self.reason_code = reason_code
+
+
+def is_windows_reserved_artifact_name(value: str) -> bool:
+    """Return whether Windows treats a basename as a device path."""
+    device_name = value.rstrip(" .").split(".", 1)[0].upper()
+    return device_name in _WINDOWS_RESERVED_NAMES
+
+
+def _normalize_artifact_reference(
+    value: Any,
+    *,
+    prefix: str,
+    suffix: str,
+    field: str,
+) -> str:
+    """Validate and canonicalize an artifact reference without touching disk."""
+    if not isinstance(value, str) or not value:
+        raise ArtifactIntegrityError(f"{field} is missing")
+    relative = PurePosixPath(value.replace("\\", "/"))
+    if (
+        relative.is_absolute()
+        or relative.parts[:1] != (prefix,)
+        or len(relative.parts) != 2
+        or ".." in relative.parts
+        or "." in relative.parts
+        or relative.suffix.lower() != suffix
+        or ":" in relative.parts[0]
+        or _ARTIFACT_BASENAME_RE.fullmatch(relative.stem) is None
+        or is_windows_reserved_artifact_name(relative.name)
+    ):
+        raise ArtifactIntegrityError(f"{field} is unsafe: {value!r}")
+    return relative.as_posix()
 
 
 @dataclass(frozen=True)
@@ -134,9 +169,15 @@ def _validate_component_identity(
     index = component.get("index")
     if not isinstance(index, int) or isinstance(index, bool):
         raise ArtifactIntegrityError(f"{where} index must be an integer")
-    for field in ("viewport", "state", "capture_path"):
+    for field in ("viewport", "state"):
         if not isinstance(component.get(field), str):
             raise ArtifactIntegrityError(f"{where} {field} must be a string")
+    component["capture_path"] = _normalize_artifact_reference(
+        component.get("capture_path"),
+        prefix="screens",
+        suffix=".png",
+        field=f"{where} capture_path",
+    )
     return index
 
 
@@ -230,6 +271,13 @@ def read_dom_document(path: Path) -> dict[str, Any]:
             value = meta.get(key)
             if value is not None and not isinstance(value, str):
                 raise ArtifactIntegrityError(f"DOM meta.{key} must be a string: {path.name}")
+        if meta.get("screen_path") is not None:
+            meta["screen_path"] = _normalize_artifact_reference(
+                meta["screen_path"],
+                prefix="screens",
+                suffix=".png",
+                field=f"DOM meta.screen_path in {path.name}",
+            )
         manual_review = meta.get("manual_review_needed")
         if manual_review is not None and not isinstance(manual_review, bool):
             raise ArtifactIntegrityError(
@@ -515,6 +563,13 @@ def read_report_document(
             raise ArtifactIntegrityError(
                 f"report component {index} capture_path is invalid: {path.name}"
             )
+        if capture_path is not None:
+            component["capture_path"] = _normalize_artifact_reference(
+                capture_path,
+                prefix="screens",
+                suffix=".png",
+                field=f"report component {index} capture_path in {path.name}",
+            )
         component_index = component.get("index", component.get("component_index"))
         if not isinstance(component_index, int) or isinstance(component_index, bool):
             raise ArtifactIntegrityError(
@@ -555,22 +610,13 @@ def _safe_relative_artifact(
     suffix: str,
     must_exist: bool = True,
 ) -> Path:
-    if not isinstance(value, str) or not value:
-        raise ArtifactIntegrityError(f"manifest artifact path for {prefix} is missing")
-    normalized = value.replace("\\", "/")
+    normalized = _normalize_artifact_reference(
+        value,
+        prefix=prefix,
+        suffix=suffix,
+        field=f"manifest artifact path for {prefix}",
+    )
     relative = PurePosixPath(normalized)
-    if (
-        relative.is_absolute()
-        or relative.parts[:1] != (prefix,)
-        or len(relative.parts) != 2
-        or ".." in relative.parts
-        or "." in relative.parts
-        or relative.suffix.lower() != suffix
-        or ":" in relative.parts[0]
-        or _ARTIFACT_BASENAME_RE.fullmatch(relative.stem) is None
-        or relative.stem.upper() in _WINDOWS_RESERVED_NAMES
-    ):
-        raise ArtifactIntegrityError(f"manifest artifact path is unsafe: {value!r}")
 
     if is_linklike(root):
         raise ArtifactIntegrityError("capture directory must not be a symlink")

@@ -460,6 +460,93 @@ def test_legacy_null_style_is_normalized_to_empty_string(tmp_path: Path) -> None
     assert _artifacts.capture_evidence(tmp_path).reviewable is True
 
 
+def test_legacy_windows_artifact_separators_are_canonicalized(tmp_path: Path) -> None:
+    _write_success_run(tmp_path)
+    dom_path = tmp_path / "dom" / "current.json"
+    document = json.loads(dom_path.read_text())
+    document["meta"]["screen_path"] = r"screens\current.png"
+    dom_path.write_text(json.dumps(document))
+    analysis_path = tmp_path / "analysis" / "current.json"
+    analysis = json.loads(analysis_path.read_text())
+    analysis["components"][0]["capture_path"] = r"screens\current.png"
+    analysis_path.write_text(json.dumps(analysis))
+    manifest_path = tmp_path / "capture-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["succeeded"][0]["screen"] = r"screens\current.png"
+    manifest["succeeded"][0]["dom"] = r"dom\current.json"
+    manifest_path.write_text(json.dumps(manifest))
+
+    normalized_manifest = _artifacts.load_capture_manifest(tmp_path)
+    normalized_dom = _artifacts.read_dom_document(dom_path)
+    normalized_analysis = _artifacts.read_analysis_document(analysis_path)
+    _artifacts.validate_analysis_capture_binding(
+        normalized_analysis,
+        normalized_dom,
+        where="legacy Windows analysis",
+    )
+
+    assert normalized_manifest is not None
+    assert normalized_manifest["succeeded"][0]["screen"] == "screens/current.png"
+    assert normalized_manifest["succeeded"][0]["dom"] == "dom/current.json"
+    assert normalized_dom["meta"]["screen_path"] == "screens/current.png"
+    assert normalized_analysis["components"][0]["capture_path"] == "screens/current.png"
+
+
+def test_legacy_windows_diagnostic_separators_are_canonicalized(tmp_path: Path) -> None:
+    _write_diagnostic_run(tmp_path)
+    dom_path = tmp_path / "dom" / "diagnostic.json"
+    document = json.loads(dom_path.read_text())
+    document["meta"]["screen_path"] = r"screens\diagnostic.png"
+    dom_path.write_text(json.dumps(document))
+    manifest_path = tmp_path / "capture-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["failures"][0]["screen"] = r"screens\diagnostic.png"
+    manifest["failures"][0]["dom"] = r"dom\diagnostic.json"
+    manifest_path.write_text(json.dumps(manifest))
+
+    normalized = _artifacts.load_capture_manifest(tmp_path)
+
+    assert normalized is not None
+    assert normalized["failures"][0]["screen"] == "screens/diagnostic.png"
+    assert normalized["failures"][0]["dom"] == "dom/diagnostic.json"
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    [
+        r"screens\..\outside.png",
+        r"C:\private\outside.png",
+    ],
+)
+def test_analysis_rejects_unsafe_windows_capture_paths(
+    tmp_path: Path,
+    unsafe_path: str,
+) -> None:
+    _write_success_run(tmp_path)
+    analysis_path = tmp_path / "analysis" / "current.json"
+    analysis = json.loads(analysis_path.read_text())
+    analysis["components"][0]["capture_path"] = unsafe_path
+    analysis_path.write_text(json.dumps(analysis))
+
+    with pytest.raises(_artifacts.ArtifactIntegrityError, match="unsafe"):
+        _artifacts.read_analysis_document(analysis_path)
+
+
+@pytest.mark.parametrize("reserved", ["con.foo.png", "LPT1.anything.png"])
+def test_manifest_rejects_windows_device_names_with_extensions(
+    tmp_path: Path,
+    reserved: str,
+) -> None:
+    _write_success_run(tmp_path)
+    manifest_path = tmp_path / "capture-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["succeeded"][0]["screen"] = f"screens/{reserved}"
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(_artifacts.ArtifactIntegrityError, match="unsafe"):
+        _artifacts.load_capture_manifest(tmp_path)
+
+
 def test_legacy_manifest_complete_flag_uses_matrix_semantics(
     tmp_path: Path,
 ) -> None:
@@ -648,6 +735,17 @@ def _write_reviewable_report(path: Path) -> dict:
     }
     path.write_text(json.dumps(report))
     return report
+
+
+def test_report_reader_canonicalizes_legacy_windows_capture_path(tmp_path: Path) -> None:
+    report_path = tmp_path / "report.json"
+    report = _write_reviewable_report(report_path)
+    report["components"][0]["capture_path"] = r"screens\desktop-default.png"
+    report_path.write_text(json.dumps(report))
+
+    parsed = _artifacts.read_report_document(report_path)
+
+    assert parsed["components"][0]["capture_path"] == "screens/desktop-default.png"
 
 
 @pytest.mark.parametrize("score", ["bad", True, float("inf"), float("nan")])

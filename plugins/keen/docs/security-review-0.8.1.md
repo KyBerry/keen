@@ -85,7 +85,7 @@ readback from the installed plugin caches.
 
 The release candidate passed:
 
-- 1,192 automated tests, with two platform/environment-specific skips
+- 1,203 automated tests, with two platform/environment-specific skips
 - browser regressions for internal-origin isolation, local-file document
   isolation, interrupted captures, final-state checks, and credential removal
 - Ruff lint and formatting checks
